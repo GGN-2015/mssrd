@@ -1,4 +1,4 @@
-"""Dataset acquisition and loading for the twelve paper benchmarks."""
+"""Dataset acquisition and loading for the eleven paper benchmarks."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import pickle
 import struct
 import tarfile
 import urllib.request
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,7 +15,6 @@ import numpy as np
 PAPER_DATASETS = (
     ("mnist", "MNIST", "handwriting"),
     ("kmnist", "KMNIST", "handwriting"),
-    ("optdigits", "UCI Optical Digits", "handwriting"),
     ("fashion_mnist", "Fashion-MNIST", "clothing"),
     ("cifar10", "CIFAR-10", "natural"),
     ("cifar100", "CIFAR-100", "natural"),
@@ -92,25 +90,6 @@ def _download(url: str, destination: Path) -> None:
     temporary.replace(destination)
 
 
-def _load_optdigits(path: Path, download: bool) -> tuple[np.ndarray, np.ndarray]:
-    if not path.exists():
-        if not download:
-            raise FileNotFoundError(path)
-        _download(
-            "https://archive.ics.uci.edu/static/public/80/"
-            "optical+recognition+of+handwritten+digits.zip",
-            path,
-        )
-    blocks: list[np.ndarray] = []
-    with zipfile.ZipFile(path) as archive:
-        members = {Path(name).name: name for name in archive.namelist()}
-        for filename in ("optdigits.tra", "optdigits.tes"):
-            with archive.open(members[filename]) as handle:
-                data = np.loadtxt(handle, delimiter=",", dtype=np.uint8)
-            blocks.append(data[:, :64].reshape(-1, 8, 8))
-    return blocks[0], blocks[1]
-
-
 def _load_torchvision(slug: str, root: Path, download: bool) -> tuple[np.ndarray, np.ndarray]:
     from torchvision import datasets
 
@@ -183,8 +162,6 @@ def load_paper_dataset(
             raw_train, raw_test = _load_cifar_archive(archive, classes)
         else:
             raw_train, raw_test = _load_torchvision(slug, root / "torchvision", download)
-    elif slug == "optdigits":
-        raw_train, raw_test = _load_optdigits(root / slug / "optdigits.zip", download)
     else:
         raw_train, raw_test = _load_medmnist(slug, root / "medmnist", download)
     original_shape = tuple(int(value) for value in raw_train.shape[1:])
@@ -200,5 +177,5 @@ def load_paper_dataset(
         original_shape=original_shape,
         train_available=train_available,
         test_available=test_available,
-        intensity_divisor=16.0 if slug == "optdigits" else 255.0,
+        intensity_divisor=255.0,
     )

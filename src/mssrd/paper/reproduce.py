@@ -952,7 +952,7 @@ def _build_figures(
             yscale="log",
             xlabel="Empirical minimum tested latent scalars",
             ylabel="Training-free predicted latent scalars",
-            title="Predicted versus empirical 95% fidelity bottlenecks",
+            title="Predicted versus empirical bottlenecks at NMSE <= 0.05",
         )
         axis.grid(True, which="both", alpha=0.2)
         axis.legend(

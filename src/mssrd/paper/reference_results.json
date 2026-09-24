@@ -4,7 +4,6 @@
   "datasets": {
     "mnist": {"prediction": {"q": 7, "channels": 22, "latent_dimension": 352}, "empirical": {"q": 7, "channels": 19, "latent_dimension": 304}},
     "kmnist": {"prediction": {"q": 7, "channels": 21, "latent_dimension": 336}, "empirical": {"q": 7, "channels": 19, "latent_dimension": 304}},
-    "optdigits": {"prediction": {"q": 8, "channels": 29, "latent_dimension": 29}, "empirical": {"q": 8, "channels": 23, "latent_dimension": 23}},
     "fashion_mnist": {"prediction": {"q": 7, "channels": 20, "latent_dimension": 320}, "empirical": {"q": 7, "channels": 19, "latent_dimension": 304}},
     "cifar10": {"prediction": {"q": 8, "channels": 13, "latent_dimension": 208}, "empirical": {"q": 8, "channels": 13, "latent_dimension": 208}},
     "cifar100": {"prediction": {"q": 8, "channels": 12, "latent_dimension": 192}, "empirical": {"q": 8, "channels": 12, "latent_dimension": 192}},

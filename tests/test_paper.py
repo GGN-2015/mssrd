@@ -20,23 +20,20 @@ from mssrd.paper.unet import (
 def test_paper_scales_match_protocol() -> None:
     assert _paper_scales(28, 28) == (2, 4, 7)
     assert _paper_scales(32, 32) == (2, 4, 8)
-    assert _paper_scales(8, 8) == (2, 4, 8)
 
 
-def test_paper_grayscale_and_optdigits_scale() -> None:
+def test_paper_grayscale() -> None:
     rgb = np.zeros((2, 4, 4, 3), dtype=np.uint8)
     rgb[..., 0] = 255
     grayscale = _paper_grayscale(rgb, 255.0)
     np.testing.assert_allclose(grayscale, 0.299, rtol=1e-6)
-    digits = np.full((2, 8, 8), 16, dtype=np.uint8)
-    np.testing.assert_allclose(_paper_grayscale(digits, 16.0), 1.0)
 
 
-def test_reference_manifest_contains_twelve_datasets() -> None:
+def test_reference_manifest_contains_eleven_datasets() -> None:
     reference = json.loads(
         files("mssrd.paper").joinpath("reference_results.json").read_text(encoding="utf-8")
     )
-    assert len(reference["datasets"]) == 12
+    assert len(reference["datasets"]) == 11
     assert reference["datasets"]["cifar10"]["prediction"] == {
         "q": 8,
         "channels": 13,

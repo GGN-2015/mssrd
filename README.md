@@ -12,7 +12,7 @@ The package provides:
 - a CLI for image directories, NPY files, and NPZ archives;
 - the linear forward and inverse mappings associated with the prediction;
 - constant-feature exclusion and grayscale or joint color-channel analysis;
-- a one-command reproduction of the twelve-dataset paper experiment;
+- a one-command reproduction of the eleven-dataset paper experiment;
 - PCA-initialized nonlinear PyTorch validation, bootstraps, repeat seeds, CSV/JSON
   results, and publication figures;
 - a true-bottleneck U-Net sweep, a full-skip control, and a structural capacity audit
@@ -194,7 +194,7 @@ uv run mssrd reproduce-paper \
 
 The default run performs all of the following:
 
-1. spectral prediction on twelve datasets;
+1. spectral prediction on eleven datasets;
 2. twenty image-level bootstrap repetitions per dataset;
 3. PCA-initialized nonlinear bottleneck searches at every paper scale;
 4. empirical-boundary, one-channel-below, and predicted runs at two additional seeds;
@@ -228,7 +228,7 @@ Useful shorter runs:
 uv run mssrd reproduce-paper --spectral-only --skip-repeats
 
 # Smoke-test one dataset with small subsets and 40 optimization steps.
-uv run mssrd reproduce-paper --datasets optdigits --quick
+uv run mssrd reproduce-paper --datasets mnist --quick
 
 # Reproduce only selected datasets.
 uv run mssrd reproduce-paper --datasets mnist,cifar10,bloodmnist
@@ -247,7 +247,6 @@ The default spectral predictions are:
 |---|---:|---:|
 | MNIST | 4 x 4 x 22 | 352 |
 | KMNIST | 4 x 4 x 21 | 336 |
-| UCI Optical Digits | 1 x 1 x 29 | 29 |
 | Fashion-MNIST | 4 x 4 x 20 | 320 |
 | CIFAR-10 | 4 x 4 x 13 | 208 |
 | CIFAR-100 | 4 x 4 x 12 | 192 |
@@ -294,9 +293,8 @@ paper-results/
 ```
 
 The six MedMNIST subsets are downloaded through the official MedMNIST API. MNIST,
-KMNIST, Fashion-MNIST, CIFAR-10, and CIFAR-100 use TorchVision downloaders. Optical
-Digits is downloaded from the UCI Machine Learning Repository. Dataset labels are not
-used by MS-SRD or by the reconstruction experiment.
+KMNIST, Fashion-MNIST, CIFAR-10, and CIFAR-100 use TorchVision downloaders. Dataset
+labels are not used by MS-SRD or by the reconstruction experiment.
 
 ## Development and tests
 
@@ -311,7 +309,7 @@ The unit tests cover known-rank synthetic images, constant-feature handling, col
 layouts, forward/inverse mappings, NPY/NPZ and directory input, CLI JSON output, and the
 paper reference manifest. They also check U-Net candidate construction, true zeroing of
 the terminal path, and skip-capacity accounting. The real-data spectral reproduction is
-also exercised before a release by running the twelve datasets against
+also exercised before a release by running the eleven datasets against
 `reference_check.json`.
 
 ## Method summary
