@@ -14,7 +14,9 @@ The package provides:
 - constant-feature exclusion and grayscale or joint color-channel analysis;
 - a one-command reproduction of the twelve-dataset paper experiment;
 - PCA-initialized nonlinear PyTorch validation, bootstraps, repeat seeds, CSV/JSON
-  results, and publication figures.
+  results, and publication figures;
+- a controlled U-Net skip-path validation and a structural capacity audit for custom
+  U-Net layouts.
 
 ## Scope
 
@@ -25,8 +27,11 @@ perceptual quality, or downstream task accuracy.
 
 The exact theorem applies to a shared linear non-overlapping block-convolutional
 autoencoder. The included paper experiment tests a PCA-initialized nonlinear extension
-without skip connections. Predictions for U-Nets, perceptual losses, or high-resolution
-color models should be treated as architecture priors that still require validation.
+without skip connections. A full U-Net is different: its encoder-to-decoder skip paths
+bypass the terminal bottleneck, so the terminal tensor alone is not the model's global
+information bottleneck. For U-Nets, use MS-SRD as a prior for a constrained bottleneck
+or account explicitly for every skip path. Predictions for perceptual losses or
+high-resolution color models likewise remain architecture priors that require validation.
 
 ## Installation
 
@@ -153,6 +158,24 @@ Set `color_mode="channels"` to retain every input channel. Set `compute_global=T
 to include a global PCA dimension, but note that the full image covariance can be
 expensive for large images.
 
+For a U-Net, audit the capacity that bypasses the terminal bottleneck by supplying the
+non-batch shape of every encoder feature tensor sent to the decoder:
+
+```python
+from mssrd import audit_unet_capacity
+
+audit = audit_unet_capacity(
+    result,
+    skip_shapes=[(16, 28, 28), (32, 14, 14), (64, 7, 7)],
+)
+print(audit.skip_to_bottleneck_ratio)
+print(audit.terminal_is_global_information_bottleneck)
+```
+
+These are raw activation scalar counts, not estimates of independent information,
+entropy, or compressed bit rate. Any nonempty skip list means that the terminal tensor
+is not the only information path into the decoder.
+
 ## Reproduce the paper
 
 The following command downloads the public datasets when needed and runs the complete
@@ -171,16 +194,20 @@ The default run performs all of the following:
 2. twenty image-level bootstrap repetitions per dataset;
 3. PCA-initialized nonlinear bottleneck searches at every paper scale;
 4. empirical-boundary, one-channel-below, and predicted runs at two additional seeds;
-5. comparison against the committed paper reference predictions;
-6. JSON, CSV, NumPy spectrum archives, and PDF/PNG figures.
+5. full-skip U-Net runs with a zeroed terminal bottleneck, one terminal channel, and the
+   MS-SRD-predicted channel count;
+6. comparison against the committed paper reference predictions;
+7. JSON, CSV, NumPy spectrum archives, and PDF/PNG figures.
 
 The neural candidate cache is stored below each dataset result directory. Re-running the
 same command resumes an interrupted experiment instead of retraining completed
 candidates.
 
-The full experiment uses at most 20,000 training images, 5,000 held-out images,
-250,000 training patches per scale, and 160 optimizer steps per candidate. CUDA is used
-automatically when available. Force a device with `--device cpu` or `--device cuda`.
+The patch experiment uses at most 20,000 training images, 5,000 held-out images,
+250,000 training patches per scale, and 160 optimizer steps per candidate. The U-Net
+experiment uses 800 image-level optimizer steps per candidate with a default batch size
+of 256. CUDA is used automatically when available. Force a device with `--device cpu`
+or `--device cuda`.
 
 Useful shorter runs:
 
@@ -193,6 +220,9 @@ uv run mssrd reproduce-paper --datasets optdigits --quick
 
 # Reproduce only selected datasets.
 uv run mssrd reproduce-paper --datasets mnist,cifar10,bloodmnist
+
+# Run only the U-Net skip-path experiment (plus the required spectral predictions).
+uv run mssrd reproduce-paper --unet-only --skip-repeats --device cuda
 ```
 
 The default spectral predictions are:
@@ -226,6 +256,8 @@ paper-results/
   summary.json
   training_runs.csv
   repeat_validation.csv
+  unet_runs.csv
+  unet_metrics.json
   metrics.json
   reference_check.json
   figures/
@@ -235,6 +267,8 @@ paper-results/
     training_cache.json
     training_runs.csv
     repeat_validation.csv
+    unet_cache.json
+    unet_runs.csv
 ```
 
 The six MedMNIST subsets are downloaded through the official MedMNIST API. MNIST,
@@ -253,8 +287,10 @@ uv build
 
 The unit tests cover known-rank synthetic images, constant-feature handling, color
 layouts, forward/inverse mappings, NPY/NPZ and directory input, CLI JSON output, and the
-paper reference manifest. The real-data spectral reproduction is also exercised before
-a release by running the twelve datasets against `reference_check.json`.
+paper reference manifest. They also check U-Net candidate construction, true zeroing of
+the terminal path, and skip-capacity accounting. The real-data spectral reproduction is
+also exercised before a release by running the twelve datasets against
+`reference_check.json`.
 
 ## Method summary
 

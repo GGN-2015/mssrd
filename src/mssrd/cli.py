@@ -63,10 +63,14 @@ def _build_parser() -> argparse.ArgumentParser:
     reproduce.add_argument("--bootstrap-reps", type=int, default=20)
     reproduce.add_argument("--steps", type=int, default=160)
     reproduce.add_argument("--batch-size", type=int, default=8192)
+    reproduce.add_argument("--unet-steps", type=int, default=800)
+    reproduce.add_argument("--unet-batch-size", type=int, default=256)
     reproduce.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     reproduce.add_argument("--no-download", action="store_true")
     reproduce.add_argument("--spectral-only", action="store_true")
+    reproduce.add_argument("--unet-only", action="store_true")
     reproduce.add_argument("--skip-repeats", action="store_true")
+    reproduce.add_argument("--skip-unet-validation", action="store_true")
     reproduce.add_argument(
         "--quick",
         action="store_true",
@@ -132,6 +136,8 @@ def _reproduce(args: argparse.Namespace) -> int:
         args.max_patch_samples = min(args.max_patch_samples, 8192)
         args.bootstrap_reps = min(args.bootstrap_reps, 2)
         args.steps = min(args.steps, 40)
+        args.unet_steps = min(args.unet_steps, 80)
+        args.unet_batch_size = min(args.unet_batch_size, 128)
         args.skip_repeats = True
     selected = (
         None
@@ -149,10 +155,14 @@ def _reproduce(args: argparse.Namespace) -> int:
         bootstrap_reps=args.bootstrap_reps,
         steps=args.steps,
         batch_size=args.batch_size,
+        unet_steps=args.unet_steps,
+        unet_batch_size=args.unet_batch_size,
         device=args.device,
         download=not args.no_download,
         spectral_only=args.spectral_only,
+        unet_only=args.unet_only,
         run_repeats=not args.skip_repeats,
+        run_unet_validation=not args.skip_unet_validation,
     )
     return 0
 

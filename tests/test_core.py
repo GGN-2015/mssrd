@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from mssrd import MSSRD, predict_bottleneck
+from mssrd import MSSRD, audit_unet_capacity, predict_bottleneck
 
 
 def low_rank_images(seed: int = 4) -> np.ndarray:
@@ -65,3 +65,13 @@ def test_invalid_scale_has_actionable_error() -> None:
     images = np.arange(5 * 7 * 8, dtype=np.float64).reshape(5, 7, 8)
     with pytest.raises(ValueError, match="must divide"):
         predict_bottleneck(images, scales=[4])
+
+
+def test_unet_capacity_audit_counts_bypass_paths() -> None:
+    result = predict_bottleneck(low_rank_images(), scales=[4])
+    audit = audit_unet_capacity(result, [(8, 8, 16), (4, 4, 32)])
+    assert audit.predicted_bottleneck_shape == (2, 2, 2)
+    assert audit.skip_path_scalars == 1536
+    assert audit.total_transmitted_scalars == 1544
+    assert audit.skip_to_bottleneck_ratio == 192.0
+    assert audit.terminal_is_global_information_bottleneck is False

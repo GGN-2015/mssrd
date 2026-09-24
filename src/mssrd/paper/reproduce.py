@@ -21,6 +21,7 @@ from matplotlib.ticker import LogLocator, NullFormatter
 from mssrd.core import MSSRD, MSSRDResult, ScaleEstimate
 from mssrd.paper.datasets import PAPER_DATASETS, PaperDataset, load_paper_dataset
 from mssrd.paper.model import coarse_channels, extract_patches, train_candidate
+from mssrd.paper.unet import UNET_PROTOCOL_VERSION, train_unet_candidate, unet_candidates
 
 
 def _paper_scales(height: int, width: int) -> tuple[int, ...]:
@@ -267,6 +268,140 @@ def _repeat_boundaries(
     return rows
 
 
+def _validate_unet(
+    *,
+    split: PaperDataset,
+    centered_train: np.ndarray,
+    centered_test: np.ndarray,
+    prediction: ScaleEstimate,
+    device: torch.device,
+    dataset_dir: Path,
+    seed: int,
+    steps: int,
+    batch_size: int,
+    target_nmse: float = 0.05,
+) -> list[dict[str, Any]]:
+    cache_path = dataset_dir / "unet_cache.json"
+    cache: dict[str, dict[str, Any]] = {}
+    if cache_path.exists():
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    records: list[dict[str, Any]] = []
+    candidates = unet_candidates(prediction, centered_train.shape[1:])
+    for candidate in candidates:
+        role_offset = sum(ord(character) for character in candidate.role)
+        candidate_seed = seed + 30000 + role_offset + candidate.channels
+        key = (
+            f"v={UNET_PROTOCOL_VERSION}|{split.slug}|role={candidate.role}|"
+            f"c={candidate.channels}|"
+            f"seed={candidate_seed}|steps={steps}|batch={batch_size}|"
+            f"train={len(centered_train)}|test={len(centered_test)}"
+        )
+        if key not in cache:
+            metrics = train_unet_candidate(
+                centered_train,
+                centered_test,
+                candidate,
+                device=device,
+                seed=candidate_seed,
+                steps=steps,
+                batch_size=min(batch_size, len(centered_train)),
+            )
+            cache[key] = {
+                "slug": split.slug,
+                "dataset": split.name,
+                "family": "unet",
+                **candidate.to_dict(),
+                "predicted_latent_scalars": prediction.latent_scalars,
+                "budget_ratio": (
+                    candidate.latent_scalars / prediction.latent_scalars
+                    if prediction.latent_scalars
+                    else None
+                ),
+                "total_transmitted_scalars": (candidate.latent_scalars + candidate.skip_scalars),
+                "target_nmse": target_nmse,
+                "passed": bool(float(metrics["final_nmse"]) <= target_nmse),
+                "seed": candidate_seed,
+                **metrics,
+            }
+            _write_json(cache_path, cache)
+            print(
+                f"[{split.slug}] U-Net/{candidate.role} "
+                f"M={candidate.latent_scalars}, skips={candidate.skip_scalars}: "
+                f"NMSE {metrics['initial_nmse']:.4f} -> {metrics['final_nmse']:.4f}",
+                flush=True,
+            )
+        records.append(cache[key])
+    return records
+
+
+def _unet_dataset_summary(
+    rows: list[dict[str, Any]], predicted_latent_scalars: int
+) -> dict[str, Any]:
+    def select(role: str) -> dict[str, Any]:
+        return next(row for row in rows if row["role"] == role)
+
+    zero = select("full_skip_zero_bottleneck")
+    one = select("full_skip_one_channel")
+    predicted = select("full_skip_prediction")
+    return {
+        "predicted_latent_scalars": predicted_latent_scalars,
+        "full_skips": {
+            "skip_scalars": int(zero["skip_scalars"]),
+            "skip_to_predicted_bottleneck_ratio": (
+                int(zero["skip_scalars"]) / predicted_latent_scalars
+            ),
+            "zero_bottleneck_nmse": float(zero["final_nmse"]),
+            "zero_bottleneck_passed": bool(zero["passed"]),
+            "one_channel_nmse": float(one["final_nmse"]),
+            "predicted_nmse": float(predicted["final_nmse"]),
+        },
+    }
+
+
+def _unet_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    slugs = sorted({str(row["slug"]) for row in rows})
+    if not slugs:
+        return {}
+
+    def selected(role: str) -> dict[str, dict[str, Any]]:
+        return {str(row["slug"]): row for row in rows if row["role"] == role}
+
+    zero = selected("full_skip_zero_bottleneck")
+    one = selected("full_skip_one_channel")
+    full_predicted = selected("full_skip_prediction")
+    skip_ratios = [
+        float(row["skip_scalars"]) / float(row["predicted_latent_scalars"]) for row in zero.values()
+    ]
+    return {
+        "dataset_count": len(slugs),
+        "full_skip_zero_bottleneck_pass_fraction": float(
+            np.mean([bool(row["passed"]) for row in zero.values()])
+        ),
+        "full_skip_zero_bottleneck_median_nmse": float(
+            np.median([float(row["final_nmse"]) for row in zero.values()])
+        ),
+        "full_skip_one_channel_pass_fraction": float(
+            np.mean([bool(row["passed"]) for row in one.values()])
+        ),
+        "full_skip_prediction_pass_fraction": float(
+            np.mean([bool(row["passed"]) for row in full_predicted.values()])
+        ),
+        "full_skip_zero_bottleneck_nmse_by_dataset": {
+            slug: float(zero[slug]["final_nmse"]) for slug in slugs
+        },
+        "skip_to_predicted_bottleneck_ratio_median": float(np.median(skip_ratios)),
+        "skip_to_predicted_bottleneck_ratio_min": float(np.min(skip_ratios)),
+        "full_skip_zero_to_prediction_nmse_median_difference": float(
+            np.median(
+                [
+                    float(zero[slug]["final_nmse"]) - float(full_predicted[slug]["final_nmse"])
+                    for slug in slugs
+                ]
+            )
+        ),
+    }
+
+
 def _summary_row(
     *,
     split: PaperDataset,
@@ -389,6 +524,7 @@ def _build_figures(
     summaries: list[dict[str, Any]],
     runs: list[dict[str, Any]],
     repeats: list[dict[str, Any]],
+    unet_runs: list[dict[str, Any]],
     spectra: dict[str, dict[int, np.ndarray]],
     output_dir: Path,
 ) -> None:
@@ -595,6 +731,58 @@ def _build_figures(
         figure.savefig(figure_dir / "boundary_robustness.pdf")
         plt.close(figure)
 
+    if unet_runs:
+        order = [str(row["slug"]) for row in summaries]
+        configurations = (
+            (
+                "full_skip_zero_bottleneck",
+                "bottleneck disabled",
+                "#cc79a7",
+                "X",
+            ),
+            (
+                "full_skip_one_channel",
+                "one channel",
+                "#009e73",
+                "s",
+            ),
+            ("full_skip_prediction", "MS-SRD c", "#0072b2", "o"),
+        )
+        figure, axis = plt.subplots(figsize=(7.5, 3.9), constrained_layout=True)
+        x = np.arange(len(order))
+        for role, label, color, marker in configurations:
+            values = []
+            for slug in order:
+                row = next(
+                    (item for item in unet_runs if item["slug"] == slug and item["role"] == role),
+                    None,
+                )
+                values.append(float(row["final_nmse"]) if row else np.nan)
+            axis.plot(
+                x,
+                values,
+                color=color,
+                marker=marker,
+                markersize=4,
+                linewidth=1,
+                label=label,
+            )
+        axis.axhline(0.05, color="#333333", linestyle="--", linewidth=1, label="5% target")
+        axis.set(
+            yscale="log",
+            xticks=x,
+            xticklabels=order,
+            ylabel="Held-out NMSE",
+            title="U-Net skip paths bypass the terminal bottleneck",
+        )
+        axis.set_ylim(1e-4, 1.2)
+        axis.tick_params(axis="x", rotation=55, labelsize=7)
+        axis.grid(axis="y", which="both", alpha=0.2)
+        axis.legend(frameon=False, fontsize=7, ncol=2)
+        figure.savefig(figure_dir / "unet_validation.png", dpi=220)
+        figure.savefig(figure_dir / "unet_validation.pdf")
+        plt.close(figure)
+
 
 def reproduce_paper(
     *,
@@ -608,10 +796,14 @@ def reproduce_paper(
     bootstrap_reps: int = 20,
     steps: int = 160,
     batch_size: int = 8192,
+    unet_steps: int = 800,
+    unet_batch_size: int = 256,
     device: str = "auto",
     download: bool = True,
     spectral_only: bool = False,
+    unet_only: bool = False,
     run_repeats: bool = True,
+    run_unet_validation: bool = True,
 ) -> list[dict[str, Any]]:
     """Reproduce spectral predictions, neural validation, and paper figures.
 
@@ -621,6 +813,8 @@ def reproduce_paper(
 
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if spectral_only and unet_only:
+        raise ValueError("spectral_only and unet_only cannot both be enabled")
     selected = tuple(item[0] for item in PAPER_DATASETS) if datasets is None else tuple(datasets)
     known = {item[0] for item in PAPER_DATASETS}
     unknown = sorted(set(selected) - known)
@@ -631,6 +825,7 @@ def reproduce_paper(
     summaries: list[dict[str, Any]] = []
     all_runs: list[dict[str, Any]] = []
     all_repeats: list[dict[str, Any]] = []
+    all_unet_runs: list[dict[str, Any]] = []
     spectra: dict[str, dict[int, np.ndarray]] = {}
     for slug in selected:
         split = load_paper_dataset(
@@ -677,52 +872,72 @@ def reproduce_paper(
         spectra[slug] = {item.scale: item.eigenvalues for item in result.scales}
         empirical: dict[str, Any] | None = None
         dataset_runs: list[dict[str, Any]] = []
+        dataset_unet_runs: list[dict[str, Any]] = []
         if not spectral_only:
-            for estimate in result.scales:
-                dataset_runs.extend(
-                    _validate_scale(
+            if not unet_only:
+                for estimate in result.scales:
+                    dataset_runs.extend(
+                        _validate_scale(
+                            split=split,
+                            centered_train=centered_train,
+                            centered_test=centered_test,
+                            estimate=estimate,
+                            device=training_device,
+                            dataset_dir=dataset_dir,
+                            seed=seed,
+                            steps=steps,
+                            batch_size=batch_size,
+                            target_nmse=0.05,
+                            max_patch_samples=max_patch_samples,
+                        )
+                    )
+                passing = [row for row in dataset_runs if bool(row["passed"])]
+                if not passing:
+                    raise RuntimeError(f"no tested bottleneck passed the target for {slug}")
+                empirical = min(
+                    passing,
+                    key=lambda row: (
+                        int(row["latent_dimension"]),
+                        int(row["q"]),
+                        int(row["channels"]),
+                    ),
+                )
+                _write_csv(dataset_dir / "training_runs.csv", dataset_runs)
+                all_runs.extend(dataset_runs)
+                if run_repeats:
+                    repeated = _repeat_boundaries(
                         split=split,
                         centered_train=centered_train,
                         centered_test=centered_test,
-                        estimate=estimate,
+                        result=result,
+                        empirical=empirical,
                         device=training_device,
-                        dataset_dir=dataset_dir,
                         seed=seed,
                         steps=steps,
                         batch_size=batch_size,
-                        target_nmse=0.05,
                         max_patch_samples=max_patch_samples,
                     )
-                )
-            passing = [row for row in dataset_runs if bool(row["passed"])]
-            if not passing:
-                raise RuntimeError(f"no tested bottleneck passed the target for {slug}")
-            empirical = min(
-                passing,
-                key=lambda row: (
-                    int(row["latent_dimension"]),
-                    int(row["q"]),
-                    int(row["channels"]),
-                ),
-            )
-            _write_csv(dataset_dir / "training_runs.csv", dataset_runs)
-            all_runs.extend(dataset_runs)
-            if run_repeats:
-                repeated = _repeat_boundaries(
+                    all_repeats.extend(repeated)
+                    _write_csv(dataset_dir / "repeat_validation.csv", repeated)
+            if run_unet_validation:
+                dataset_unet_runs = _validate_unet(
                     split=split,
                     centered_train=centered_train,
                     centered_test=centered_test,
-                    result=result,
-                    empirical=empirical,
+                    prediction=result.prediction,
                     device=training_device,
+                    dataset_dir=dataset_dir,
                     seed=seed,
-                    steps=steps,
-                    batch_size=batch_size,
-                    max_patch_samples=max_patch_samples,
+                    steps=unet_steps,
+                    batch_size=unet_batch_size,
                 )
-                all_repeats.extend(repeated)
-                _write_csv(dataset_dir / "repeat_validation.csv", repeated)
+                all_unet_runs.extend(dataset_unet_runs)
+                _write_csv(dataset_dir / "unet_runs.csv", dataset_unet_runs)
         summary = _summary_row(split=split, result=result, bootstrap=bootstrap, empirical=empirical)
+        if dataset_unet_runs:
+            summary["unet_validation"] = _unet_dataset_summary(
+                dataset_unet_runs, result.prediction.latent_scalars
+            )
         summaries.append(summary)
         _write_json(dataset_dir / "summary.json", summary)
         del train, test, centered_train, centered_test
@@ -731,11 +946,21 @@ def reproduce_paper(
     _write_csv(output / "dataset_summary.csv", summaries)
     _write_csv(output / "training_runs.csv", all_runs)
     _write_csv(output / "repeat_validation.csv", all_repeats)
+    _write_csv(output / "unet_runs.csv", all_unet_runs)
     reference_check = _reference_check(summaries, seed=seed, max_train=max_train, max_test=max_test)
     _write_json(output / "reference_check.json", reference_check)
     metrics = _metrics(summaries, all_repeats)
     _write_json(output / "metrics.json", metrics)
-    _build_figures(summaries, all_runs, all_repeats, spectra, output)
+    unet_metrics = _unet_metrics(all_unet_runs)
+    _write_json(output / "unet_metrics.json", unet_metrics)
+    _build_figures(
+        summaries,
+        all_runs,
+        all_repeats,
+        all_unet_runs,
+        spectra,
+        output,
+    )
     print(f"Wrote paper results to {output}", flush=True)
     if reference_check["all_spectral_predictions_match"] is False:
         print("WARNING: spectral predictions differ from the committed paper reference", flush=True)
