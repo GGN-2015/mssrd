@@ -2,9 +2,10 @@
 
 MS-SRD (Multiscale Spectral Rate-Distortion) predicts a convolutional autoencoder
 bottleneck tensor directly from an image dataset, before a neural network is trained.
-It estimates covariance spectra of local image patches at several spatial scales,
+It estimates covariance spectra of local image patches at several spatial scales and
 finds the smallest channel count whose linear reconstruction meets a requested NMSE
-budget, and selects the tensor with the fewest latent scalars.
+budget at each scale. It reports both the minimum-latent candidate and the
+activation--parameter Pareto frontier over the supplied architectural cuts.
 
 The package provides:
 
@@ -12,9 +13,10 @@ The package provides:
 - a CLI for image directories, NPY files, and NPZ archives;
 - the linear forward and inverse mappings associated with the prediction;
 - constant-feature exclusion and grayscale or joint color-channel analysis;
-- a one-command reproduction of the eleven-dataset paper experiment;
+- a one-command reproduction of the thirteen-dataset paper experiment;
 - PCA-initialized nonlinear PyTorch validation, bootstraps, repeat seeds, CSV/JSON
   results, and publication figures;
+- resolution/aspect-ratio stress tests and deployable width-selector baselines;
 - a true-bottleneck U-Net sweep, a full-skip control, and a structural capacity audit
   for custom U-Net layouts.
 
@@ -107,9 +109,11 @@ space and color channels:
 uv run mssrd predict rgb.npy --color-mode channels --channel-axis -1
 ```
 
-With `--scales auto`, MS-SRD uses every common image-dimension divisor from 2 through
-`--max-patch-size`. Explicit scales must divide both the image height and width. Use
-`--max-images` with a seed for a deterministic subset of a very large dataset.
+With `--scales auto`, MS-SRD uses every integer scale from 2 through
+`--max-patch-size`. Scales need not divide the image dimensions: after subtracting the
+training-set pixel mean, the estimator zero-pads the bottom and right edges to complete
+the final blocks. The inverse mapping crops the reconstruction back to the original
+shape. Use `--max-images` with a seed for a deterministic subset of a very large dataset.
 
 ## Python API
 
@@ -131,6 +135,7 @@ result = predict_bottleneck(
 )
 
 print(result.prediction.tensor_shape)
+print(result.pareto_frontier)
 print(result.prediction.latent_scalars)
 print(result.to_dict())
 ```
@@ -155,7 +160,7 @@ print(result.prediction.linear_nmse)
 
 MS-SRD subtracts the training per-pixel mean. It does not divide every pixel by its
 standard deviation, because per-pixel Z-normalization changes the raw-pixel MSE
-objective. Constant pixels become zero-energy covariance directions and are excluded
+objective. Constant pixels become zero-variance covariance directions and are excluded
 automatically. A dataset in which every feature is constant raises an error.
 
 Set `color_mode="channels"` to retain every input channel. Set `compute_global=True`
@@ -194,7 +199,8 @@ uv run mssrd reproduce-paper \
 
 The default run performs all of the following:
 
-1. spectral prediction on eleven datasets;
+1. spectral prediction on thirteen datasets, including Oxford-IIIT Pet and EuroSAT at
+   64 x 64 pixels;
 2. twenty image-level bootstrap repetitions per dataset;
 3. PCA-initialized nonlinear bottleneck searches at every paper scale;
 4. empirical-boundary, one-channel-below, and predicted runs at two additional seeds;
@@ -204,17 +210,24 @@ The default run performs all of the following:
 6. full-skip U-Net controls with a zeroed terminal tensor, one terminal channel, and the
    MS-SRD-predicted channel count;
 7. comparison against the committed paper reference predictions;
-8. JSON, CSV, NumPy spectrum archives, and PDF/PNG figures.
+8. a resolution/aspect-ratio stress test and fixed-cut comparisons with block PCA,
+   validation grid search, and a Least-Volume adaptation;
+9. JSON, CSV, NumPy spectrum archives, and PDF/PNG figures.
+
+The primary seed is `20260924`; the two repeat-validation seeds are `20260925` and
+`20260926`. Candidate-specific U-Net seeds are derived deterministically from the
+primary seed, dataset slug, distortion target, and channel count. Every result file
+records the seed used for that run.
 
 The neural candidate cache is stored below each dataset result directory. Re-running the
 same command resumes an interrupted experiment instead of retraining completed
 candidates.
 
-The patch experiment uses at most 20,000 training images, 5,000 held-out images,
-250,000 training patches per scale, and 160 optimizer steps per candidate. The U-Net
-experiment uses 800 image-level optimizer steps per candidate with a default batch size
-of 256. CUDA is used automatically when available. Force a device with `--device cpu`
-or `--device cuda`.
+The patch experiment uses at most 20,000 development-pool images, 5,000 external-pool
+images, 250,000 training patches per scale, and 160 optimizer steps per candidate. The
+U-Net experiment uses 800 image-level optimizer steps per candidate with a default
+batch size of 256. CUDA is used automatically when available. Force a device with
+`--device cpu` or `--device cuda`.
 
 In `true_bottleneck_boundaries.csv`, `predicted_channels` is the training-free MS-SRD
 output, `empirical_channels` is selected on the validation split, and
@@ -226,6 +239,9 @@ Useful shorter runs:
 ```bash
 # Recompute all training-free predictions without neural validation.
 uv run mssrd reproduce-paper --spectral-only --skip-repeats
+
+# Skip the two supplementary experiments in an otherwise complete run.
+uv run mssrd reproduce-paper --skip-geometry-stress --skip-deployable-baselines
 
 # Smoke-test one dataset with small subsets and 40 optimization steps.
 uv run mssrd reproduce-paper --datasets mnist --quick
@@ -256,6 +272,8 @@ The default spectral predictions are:
 | OrganAMNIST | 4 x 4 x 30 | 480 |
 | RetinaMNIST | 4 x 4 x 6 | 96 |
 | BloodMNIST | 4 x 4 x 13 | 208 |
+| Oxford-IIIT Pet | 8 x 8 x 10 | 640 |
+| EuroSAT | 8 x 8 x 8 | 512 |
 
 `paper-results/reference_check.json` states whether a default spectral run exactly
 matches these committed predictions. Small floating-point differences in nonlinear GPU
@@ -276,6 +294,14 @@ paper-results/
   true_bottleneck_runs.csv
   true_bottleneck_boundaries.csv
   true_bottleneck_metrics.json
+  geometry_stress/
+    geometry_stress.csv
+    geometry_stress.json
+    geometry_stress.pdf
+  deployable_baselines/
+    deployable_baselines.csv
+    deployable_baselines.json
+    deployable_baseline_metrics.json
   metrics.json
   reference_check.json
   figures/
@@ -309,7 +335,7 @@ The unit tests cover known-rank synthetic images, constant-feature handling, col
 layouts, forward/inverse mappings, NPY/NPZ and directory input, CLI JSON output, and the
 paper reference manifest. They also check U-Net candidate construction, true zeroing of
 the terminal path, and skip-capacity accounting. The real-data spectral reproduction is
-also exercised before a release by running the eleven datasets against
+also exercised before a release by running the thirteen datasets against
 `reference_check.json`.
 
 ## Method summary
@@ -322,15 +348,19 @@ chooses the smallest channel count `c_q` for which
 sum(lambda_(cq+1) ... lambda_d) / sum(lambda_1 ... lambda_d) <= delta.
 ```
 
-There are `(H/q)(W/q)` spatial positions, so the candidate scalar count is
+The centered image is zero-padded on the bottom and right when `q` does not divide its
+dimensions. There are `ceil(H/q)ceil(W/q)` spatial positions, so the candidate scalar
+count is
 
 ```text
-M_q = (H/q)(W/q)c_q.
+M_q = ceil(H/q)ceil(W/q)c_q.
 ```
 
-The prediction is the candidate with the smallest `M_q`. For a shared linear block
-encoder and decoder under MSE, the unreconstructed population patch energy is exactly
-the eigenvalue tail after `c_q`, making the rule optimal over the supplied scales.
+The single-number prediction is the candidate with the smallest `M_q`. The complete
+result also reports candidates that are non-dominated in latent activations and shared
+linear encoder--decoder parameters. For a fixed scale, the unreconstructed population
+patch variance is exactly the eigenvalue tail after `c_q`; the decoder crops the padded
+reconstruction to the original image dimensions.
 
 ## License and citation
 

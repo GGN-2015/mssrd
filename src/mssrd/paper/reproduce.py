@@ -34,13 +34,7 @@ UNET_NMSE_TARGETS = (0.10, 0.05, 0.02, 0.01)
 
 
 def _paper_scales(height: int, width: int) -> tuple[int, ...]:
-    divisors = [
-        scale
-        for scale in range(2, min(height, width) + 1)
-        if height % scale == 0 and width % scale == 0
-    ]
-    preferred = tuple(scale for scale in divisors if scale in {2, 4, 7, 8})
-    return preferred or tuple(divisors[:3])
+    return tuple(range(2, min(height, width, 8) + 1))
 
 
 def _paper_grayscale(images: np.ndarray, divisor: float) -> np.ndarray:
@@ -620,9 +614,7 @@ def _validate_true_bottleneck_unet(
                 "boundary_test_passed": (
                     bool(float(empirical["test_nmse"]) <= target) if empirical else None
                 ),
-                "test_oracle_channels": (
-                    int(test_oracle["channels"]) if test_oracle else None
-                ),
+                "test_oracle_channels": (int(test_oracle["channels"]) if test_oracle else None),
                 "test_oracle_latent_scalars": (
                     int(test_oracle["latent_scalars"]) if test_oracle else None
                 ),
@@ -655,8 +647,7 @@ def _true_bottleneck_metrics(boundaries: list[dict[str, Any]]) -> dict[str, Any]
             calibration_ratio = float(
                 np.median(
                     [
-                        float(other["test_oracle_channels"])
-                        / float(other["predicted_channels"])
+                        float(other["test_oracle_channels"]) / float(other["predicted_channels"])
                         for other in calibration_rows
                     ]
                 )
@@ -684,8 +675,7 @@ def _true_bottleneck_metrics(boundaries: list[dict[str, Any]]) -> dict[str, Any]
         if len(selected) > 1:
             for row in selected:
                 other_ratios = [
-                    float(other["test_oracle_channels"])
-                    / float(other["predicted_channels"])
+                    float(other["test_oracle_channels"]) / float(other["predicted_channels"])
                     for other in selected
                     if other["slug"] != row["slug"]
                 ]
@@ -694,8 +684,7 @@ def _true_bottleneck_metrics(boundaries: list[dict[str, Any]]) -> dict[str, Any]
                         1,
                         int(
                             np.ceil(
-                                float(np.median(other_ratios))
-                                * float(row["predicted_channels"])
+                                float(np.median(other_ratios)) * float(row["predicted_channels"])
                             )
                         ),
                     )
@@ -718,8 +707,7 @@ def _true_bottleneck_metrics(boundaries: list[dict[str, Any]]) -> dict[str, Any]
             "leave_one_dataset_out_calibrated_channel_mape": (
                 float(
                     np.mean(
-                        np.abs(np.asarray(target_calibrated) - target_empirical)
-                        / target_empirical
+                        np.abs(np.asarray(target_calibrated) - target_empirical) / target_empirical
                     )
                 )
                 if target_calibrated
@@ -892,11 +880,22 @@ def _build_figures(
     figure_dir.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({"font.size": 9, "axes.titlesize": 10, "axes.labelsize": 9})
 
+    available = [str(row["slug"]) for row in summaries if str(row["slug"]) in spectra]
     representatives = [
         slug for slug in ("mnist", "fashion_mnist", "cifar10", "chestmnist") if slug in spectra
     ]
+    representatives.extend(slug for slug in available if slug not in representatives)
+    representatives = representatives[:4]
     if representatives:
-        figure, axes = plt.subplots(2, 2, figsize=(7.2, 5.7), constrained_layout=True)
+        row_count = (len(representatives) + 1) // 2
+        column_count = min(2, len(representatives))
+        figure, axes = plt.subplots(
+            row_count,
+            column_count,
+            figsize=(7.2, 2.85 * row_count),
+            constrained_layout=True,
+            squeeze=False,
+        )
         for axis in axes.flat:
             axis.set_visible(False)
         for axis, slug in zip(axes.flat, representatives, strict=False):
@@ -971,7 +970,12 @@ def _build_figures(
         figure, axis = plt.subplots(figsize=(7.4, 4.1), constrained_layout=True)
         axis.bar(
             x - width,
-            [float(row["global_pca95_dimension"]) for row in summaries],
+            [
+                np.nan
+                if row["global_pca95_dimension"] is None
+                else float(row["global_pca95_dimension"])
+                for row in summaries
+            ],
             width,
             label="Global PCA",
         )
@@ -1002,7 +1006,15 @@ def _build_figures(
         plt.close(figure)
 
     if runs and representatives:
-        figure, axes = plt.subplots(2, 2, figsize=(7.2, 5.8), constrained_layout=True)
+        row_count = (len(representatives) + 1) // 2
+        column_count = min(2, len(representatives))
+        figure, axes = plt.subplots(
+            row_count,
+            column_count,
+            figsize=(7.2, 2.9 * row_count),
+            constrained_layout=True,
+            squeeze=False,
+        )
         for axis in axes.flat:
             axis.set_visible(False)
         for axis, slug in zip(axes.flat, representatives, strict=False):
@@ -1032,7 +1044,7 @@ def _build_figures(
                 xscale="log",
                 yscale="log",
                 xlabel="Latent scalars",
-                ylabel="Held-out NMSE",
+                ylabel="External-pool NMSE",
                 title=slug,
             )
             axis.set_ylim(8e-3, 1.2)
@@ -1081,7 +1093,7 @@ def _build_figures(
         axis.set(
             xticks=x,
             xticklabels=order,
-            ylabel="Held-out NMSE",
+            ylabel="External-pool NMSE",
             title="Boundary stability across two additional training seeds",
         )
         axis.tick_params(axis="x", rotation=45, labelsize=7.5)
@@ -1132,7 +1144,7 @@ def _build_figures(
             yscale="log",
             xticks=x,
             xticklabels=order,
-            ylabel="Held-out NMSE",
+            ylabel="External-split NMSE",
             title="U-Net skip paths bypass the terminal bottleneck",
         )
         axis.set_ylim(1e-4, 1.2)
@@ -1255,10 +1267,7 @@ def _build_figures(
             )
             axis_ratio.scatter(
                 np.full(len(rows), target),
-                [
-                    int(row["test_oracle_channels"]) / int(row["predicted_channels"])
-                    for row in rows
-                ],
+                [int(row["test_oracle_channels"]) / int(row["predicted_channels"]) for row in rows],
                 color=color,
                 s=22,
                 alpha=0.85,
@@ -1325,6 +1334,7 @@ def reproduce_paper(
     steps: int = 160,
     batch_size: int = 8192,
     unet_steps: int = 800,
+    least_volume_steps: int = 800,
     unet_batch_size: int = 256,
     unet_targets: Sequence[float] = UNET_NMSE_TARGETS,
     device: str = "auto",
@@ -1335,6 +1345,8 @@ def reproduce_paper(
     run_unet_validation: bool = True,
     run_full_skip_validation: bool = True,
     run_true_bottleneck_validation: bool = True,
+    run_geometry_stress_experiment: bool = True,
+    run_deployable_baseline_experiment: bool = True,
 ) -> list[dict[str, Any]]:
     """Reproduce spectral predictions, neural validation, and paper figures.
 
@@ -1382,7 +1394,7 @@ def reproduce_paper(
             color_mode="grayscale",
             seed=seed,
             batch_size=512,
-            compute_global=True,
+            compute_global=max(train.shape[1:]) <= 32,
         )
         result = estimator.fit(train)
         mean_image = estimator.mean_image_[..., 0].astype(np.float32)
@@ -1531,6 +1543,35 @@ def reproduce_paper(
         spectra,
         output,
     )
+    if run_geometry_stress_experiment and not unet_only and "oxford_pets" in selected:
+        from mssrd.paper.geometry import run_geometry_stress
+
+        run_geometry_stress(
+            data_dir=data_dir,
+            output_dir=output / "geometry_stress",
+            seed=seed,
+            max_train=min(max_train, 3680),
+            download=download,
+        )
+    if run_deployable_baseline_experiment and not spectral_only and not unet_only:
+        from mssrd.paper.baselines import BASELINE_DATASETS, run_deployable_baselines
+
+        baseline_datasets = tuple(slug for slug in BASELINE_DATASETS if slug in selected)
+        if baseline_datasets:
+            run_deployable_baselines(
+                data_dir=data_dir,
+                output_dir=output / "deployable_baselines",
+                seed=seed,
+                max_train=max_train,
+                max_test=max_test,
+                max_patch_samples=max_patch_samples,
+                steps=steps,
+                least_volume_steps=least_volume_steps,
+                batch_size=batch_size,
+                device=device,
+                download=download,
+                datasets=baseline_datasets,
+            )
     print(f"Wrote paper results to {output}", flush=True)
     if reference_check["all_spectral_predictions_match"] is False:
         print("WARNING: spectral predictions differ from the committed paper reference", flush=True)

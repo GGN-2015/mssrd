@@ -15,8 +15,8 @@ from torch.nn import functional as F
 
 from mssrd.core import ScaleEstimate
 
-UNET_PROTOCOL_VERSION = 1
-TRUE_BOTTLENECK_PROTOCOL_VERSION = 4
+UNET_PROTOCOL_VERSION = 2
+TRUE_BOTTLENECK_PROTOCOL_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,7 @@ class UNetAutoencoder(nn.Module):
         internal_channels = max(1, bottleneck_channels)
         self.disable_bottleneck = bottleneck_channels == 0
         self.use_encoder_skips = use_encoder_skips
+        self.to_latent_grid = expected_grid
         self.encoder0 = ConvBlock(1, self.widths[0])
         self.down1 = nn.Conv2d(self.widths[0], self.widths[1], 3, stride=2, padding=1)
         self.encoder1 = ConvBlock(self.widths[1], self.widths[1])
@@ -114,18 +115,12 @@ class UNetAutoencoder(nn.Module):
         self.decoder0 = ConvBlock(self.widths[1] + self.widths[0], self.widths[0])
         self.output = nn.Conv2d(self.widths[0], 1, kernel_size=1)
 
-        height, width = image_shape
-        actual_grid = (math.ceil(height / 8), math.ceil(width / 8))
-        if actual_grid != expected_grid:
-            raise ValueError(
-                f"three-level U-Net produces grid {actual_grid}, expected {expected_grid}"
-            )
-
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         skip0 = self.encoder0(values)
         skip1 = self.encoder1(F.gelu(self.down1(skip0)))
         skip2 = self.encoder2(F.gelu(self.down2(skip1)))
         bridge = self.bridge(F.gelu(self.down3(skip2)))
+        bridge = F.adaptive_avg_pool2d(bridge, self.to_latent_grid)
         latent = self.to_latent(bridge)
         if self.disable_bottleneck:
             latent = torch.zeros_like(latent)
@@ -191,20 +186,21 @@ class TrueBottleneckUNetAutoencoder(nn.Module):
         nn.init.zeros_(self.output.bias)
 
         height, width = image_shape
-        actual_grid = (math.ceil(height / 8), math.ceil(width / 8))
-        if actual_grid != expected_grid:
+        spectral_grid = (math.ceil(height / scale), math.ceil(width / scale))
+        if spectral_grid != expected_grid:
             raise ValueError(
-                f"three-level U-Net produces grid {actual_grid}, expected {expected_grid}"
-            )
-        if (height // scale, width // scale) != expected_grid:
-            raise ValueError(
-                f"spectral scale {scale} produces grid {(height // scale, width // scale)}, "
-                f"expected {expected_grid}"
+                f"spectral scale {scale} produces grid {spectral_grid}, expected {expected_grid}"
             )
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         size0 = values.shape[-2:]
-        patches = F.unfold(values, kernel_size=self.scale, stride=self.scale)
+        padded_height = self.expected_grid[0] * self.scale
+        padded_width = self.expected_grid[1] * self.scale
+        padded = F.pad(
+            values,
+            (0, padded_width - size0[1], 0, padded_height - size0[0]),
+        )
+        patches = F.unfold(padded, kernel_size=self.scale, stride=self.scale)
         spectral_latent = torch.matmul(patches.transpose(1, 2), self.basis)
         spectral_latent = spectral_latent.transpose(1, 2).reshape(
             len(values), self.basis.shape[1], *self.expected_grid
@@ -224,10 +220,11 @@ class TrueBottleneckUNetAutoencoder(nn.Module):
         ).transpose(1, 2)
         spectral_reconstruction = F.fold(
             decoded_patches,
-            output_size=self.image_shape,
+            output_size=(padded_height, padded_width),
             kernel_size=self.scale,
             stride=self.scale,
         )
+        spectral_reconstruction = spectral_reconstruction[..., : size0[0], : size0[1]]
         decoded = self.decoder_from_latent(latent)
         decoded = F.interpolate(decoded, size=size2, mode="bilinear", align_corners=False)
         decoded = self.decoder2(decoded)

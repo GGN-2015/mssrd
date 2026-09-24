@@ -6,8 +6,11 @@ from importlib.resources import files
 import numpy as np
 import pytest
 import torch
+from PIL import Image
 
 from mssrd.core import ScaleEstimate
+from mssrd.paper.datasets import _load_resized_paths
+from mssrd.paper.model import LeastVolumePatchAutoencoder
 from mssrd.paper.reproduce import _metrics, _paper_grayscale, _paper_scales
 from mssrd.paper.unet import (
     build_true_bottleneck_model,
@@ -18,8 +21,9 @@ from mssrd.paper.unet import (
 
 
 def test_paper_scales_match_protocol() -> None:
-    assert _paper_scales(28, 28) == (2, 4, 7)
-    assert _paper_scales(32, 32) == (2, 4, 8)
+    assert _paper_scales(28, 28) == (2, 3, 4, 5, 6, 7, 8)
+    assert _paper_scales(32, 32) == (2, 3, 4, 5, 6, 7, 8)
+    assert _paper_scales(64, 64) == (2, 3, 4, 5, 6, 7, 8)
 
 
 def test_paper_grayscale() -> None:
@@ -29,15 +33,53 @@ def test_paper_grayscale() -> None:
     np.testing.assert_allclose(grayscale, 0.299, rtol=1e-6)
 
 
-def test_reference_manifest_contains_eleven_datasets() -> None:
+def test_resized_dataset_cache_is_reused(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    Image.fromarray(np.full((9, 7, 3), 127, dtype=np.uint8)).save(source)
+    cache = tmp_path / "cache" / "images.npy"
+    first = _load_resized_paths([source], 1, 4, dataset_name="test", cache_path=cache)
+    source.unlink()
+    second = _load_resized_paths([source], 1, 4, dataset_name="test", cache_path=cache)
+    assert first.shape == (1, 64, 64, 3)
+    np.testing.assert_array_equal(first, second)
+
+
+def test_resized_dataset_supports_rectangular_geometry(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    Image.fromarray(np.full((9, 7, 3), 127, dtype=np.uint8)).save(source)
+    images = _load_resized_paths(
+        [source],
+        1,
+        4,
+        dataset_name="test",
+        cache_path=tmp_path / "cache" / "rectangular.npy",
+        image_shape=(6, 10),
+    )
+    assert images.shape == (1, 6, 10, 3)
+
+
+def test_least_volume_patch_autoencoder_preserves_patch_shape() -> None:
+    model = LeastVolumePatchAutoencoder(np.eye(4, dtype=np.float32), hidden=8)
+    values = torch.randn(5, 4)
+    output = model(values)
+    assert output.shape == values.shape
+    assert torch.isfinite(output).all()
+
+
+def test_reference_manifest_contains_thirteen_datasets() -> None:
     reference = json.loads(
         files("mssrd.paper").joinpath("reference_results.json").read_text(encoding="utf-8")
     )
-    assert len(reference["datasets"]) == 11
+    assert len(reference["datasets"]) == 13
     assert reference["datasets"]["cifar10"]["prediction"] == {
         "q": 8,
         "channels": 13,
         "latent_dimension": 208,
+    }
+    assert reference["datasets"]["oxford_pets"]["prediction"] == {
+        "q": 8,
+        "channels": 10,
+        "latent_dimension": 640,
     }
 
 
@@ -119,3 +161,16 @@ def test_true_bottleneck_unet_starts_at_spectral_projection() -> None:
             projected, output_size=(28, 28), kernel_size=7, stride=7
         )
     torch.testing.assert_close(output, expected)
+
+
+def test_true_bottleneck_unet_pads_a_nondivisor_scale() -> None:
+    candidate = true_bottleneck_candidate(64, scale=8, grid_height=4, grid_width=4)
+    model = build_true_bottleneck_model(
+        candidate,
+        image_shape=(28, 28),
+        basis=np.eye(64, dtype=np.float32),
+    )
+    values = torch.randn(2, 1, 28, 28)
+    with torch.no_grad():
+        output = model(values)
+    torch.testing.assert_close(output, values)

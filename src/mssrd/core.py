@@ -35,10 +35,18 @@ class ScaleEstimate:
     participation_ratio: float
     eigenvalues: FloatArray = field(repr=False, compare=False)
     basis: FloatArray = field(repr=False, compare=False)
+    padding_bottom: int = 0
+    padding_right: int = 0
 
     @property
     def tensor_shape(self) -> tuple[int, int, int]:
         return self.grid_height, self.grid_width, self.channels
+
+    @property
+    def linear_parameter_count(self) -> int:
+        """Bias-free encoder and decoder parameters for the shared block map."""
+
+        return 2 * self.patch_dimension * self.channels
 
     def to_dict(self, *, include_eigenvalues: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -48,7 +56,10 @@ class ScaleEstimate:
             "channels": self.channels,
             "tensor_shape": list(self.tensor_shape),
             "patch_dimension": self.patch_dimension,
+            "padding_bottom": self.padding_bottom,
+            "padding_right": self.padding_right,
             "latent_scalars": self.latent_scalars,
+            "linear_parameter_count": self.linear_parameter_count,
             "retained_variance": self.retained_variance,
             "linear_nmse": self.linear_nmse,
             "active_rd_modes": self.active_rd_modes,
@@ -81,6 +92,25 @@ class MSSRDResult:
     def prediction(self) -> ScaleEstimate:
         return self.scales[self.prediction_index]
 
+    @property
+    def pareto_frontier(self) -> tuple[ScaleEstimate, ...]:
+        """Scales not dominated in latent scalars and shared linear parameters."""
+
+        frontier = []
+        for candidate in self.scales:
+            dominated = any(
+                other.latent_scalars <= candidate.latent_scalars
+                and other.linear_parameter_count <= candidate.linear_parameter_count
+                and (
+                    other.latent_scalars < candidate.latent_scalars
+                    or other.linear_parameter_count < candidate.linear_parameter_count
+                )
+                for other in self.scales
+            )
+            if not dominated:
+                frontier.append(candidate)
+        return tuple(frontier)
+
     def to_dict(self, *, include_eigenvalues: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "method": "MS-SRD",
@@ -93,6 +123,8 @@ class MSSRDResult:
             "constant_input_features": self.constant_input_features,
             "nonconstant_input_features": self.nonconstant_input_features,
             "prediction": self.prediction.to_dict(include_eigenvalues=include_eigenvalues),
+            "selection_rule": "minimum latent scalars over the supplied candidate scales",
+            "pareto_frontier_scales": [item.scale for item in self.pareto_frontier],
             "scales": [
                 scale.to_dict(include_eigenvalues=include_eigenvalues) for scale in self.scales
             ],
@@ -230,13 +262,25 @@ def _patch_spectrum(
     batch_size: int,
 ) -> tuple[FloatArray, FloatArray]:
     _, height, width, channels = centered_images.shape
-    grid_height, grid_width = height // scale, width // scale
+    grid_height = (height + scale - 1) // scale
+    grid_width = (width + scale - 1) // scale
+    padded_height = grid_height * scale
+    padded_width = grid_width * scale
     dimension = scale * scale * channels
     total = np.zeros(dimension, dtype=np.float64)
     cross = np.zeros((dimension, dimension), dtype=np.float64)
     count = 0
     for start in range(0, len(centered_images), batch_size):
         batch = centered_images[start : start + batch_size]
+        batch = np.pad(
+            batch,
+            (
+                (0, 0),
+                (0, padded_height - height),
+                (0, padded_width - width),
+                (0, 0),
+            ),
+        )
         patches = (
             batch.reshape(len(batch), grid_height, scale, grid_width, scale, channels)
             .transpose(0, 1, 3, 2, 4, 5)
@@ -258,24 +302,19 @@ def _resolve_scales(
     max_patch_size: int,
 ) -> tuple[int, ...]:
     if scales is None:
-        resolved = tuple(
-            scale
-            for scale in range(2, min(height, width, max_patch_size) + 1)
-            if height % scale == 0 and width % scale == 0
-        )
+        resolved = tuple(range(2, min(height, width, max_patch_size) + 1))
     else:
         resolved = tuple(sorted(set(int(scale) for scale in scales)))
     if not resolved:
         raise ValueError(
             "No valid patch scales. Pass scales explicitly or increase max_patch_size."
         )
-    invalid = [
-        scale
-        for scale in resolved
-        if scale < 1 or scale > min(height, width) or height % scale or width % scale
-    ]
+    invalid = [scale for scale in resolved if scale < 1 or scale > min(height, width)]
     if invalid:
-        raise ValueError(f"scales must divide both image dimensions; invalid values: {invalid}")
+        raise ValueError(
+            "scales must be positive and no larger than the shorter image dimension; "
+            f"invalid values: {invalid}"
+        )
     return resolved
 
 
@@ -291,8 +330,9 @@ class MSSRD:
         Backward-compatible complement of ``target_nmse``. Specify at most one
         of these arguments.
     scales:
-        Candidate square patch sizes. If omitted, all common divisors from 2
-        through ``max_patch_size`` are used.
+        Candidate square patch sizes. Scales need not divide the image dimensions;
+        centered images are zero-padded on the bottom and right before patching.
+        If omitted, every integer from 2 through ``max_patch_size`` is used.
     color_mode:
         ``"grayscale"`` applies BT.601 luma to RGB data. ``"channels"`` keeps
         all channels and lets each local eigenmode mix space and color.
@@ -369,7 +409,8 @@ class MSSRD:
             linear_nmse = tail / total_energy if total_energy > 0.0 else 0.0
             active, _, rate = _reverse_waterfill(eigenvalues, 1.0 - self.retained_variance)
             entropy_rank, participation = _effective_ranks(eigenvalues)
-            grid_height, grid_width = height // scale, width // scale
+            grid_height = (height + scale - 1) // scale
+            grid_width = (width + scale - 1) // scale
             estimates.append(
                 ScaleEstimate(
                     scale=scale,
@@ -386,6 +427,8 @@ class MSSRD:
                     participation_ratio=participation,
                     eigenvalues=eigenvalues,
                     basis=eigenvectors,
+                    padding_bottom=grid_height * scale - height,
+                    padding_right=grid_width * scale - width,
                 )
             )
         prediction_index = min(
@@ -438,11 +481,20 @@ class MSSRD:
             estimate = matches[0]
         q = estimate.scale
         n, height, width, channels = prepared.shape
+        centered = prepared - self.mean_image_
+        centered = np.pad(
+            centered,
+            (
+                (0, 0),
+                (0, estimate.padding_bottom),
+                (0, estimate.padding_right),
+                (0, 0),
+            ),
+        )
         patches = (
-            (prepared - self.mean_image_)
-            .reshape(n, height // q, q, width // q, q, channels)
+            centered.reshape(n, estimate.grid_height, q, estimate.grid_width, q, channels)
             .transpose(0, 1, 3, 2, 4, 5)
-            .reshape(n, height // q, width // q, -1)
+            .reshape(n, estimate.grid_height, estimate.grid_width, -1)
         )
         return np.ascontiguousarray(patches @ estimate.basis[:, : estimate.channels])
 
@@ -463,11 +515,14 @@ class MSSRD:
         q = estimate.scale
         channels = self.input_shape_[2]
         patches = encoded @ estimate.basis[:, : estimate.channels].T
+        padded_height = estimate.grid_height * q
+        padded_width = estimate.grid_width * q
         reconstructed = (
             patches.reshape(len(encoded), estimate.grid_height, estimate.grid_width, q, q, channels)
             .transpose(0, 1, 3, 2, 4, 5)
-            .reshape(len(encoded), self.input_shape_[0], self.input_shape_[1], channels)
+            .reshape(len(encoded), padded_height, padded_width, channels)
         )
+        reconstructed = reconstructed[:, : self.input_shape_[0], : self.input_shape_[1], :]
         reconstructed += self.mean_image_
         if self.color_mode == "grayscale":
             return reconstructed[..., 0]

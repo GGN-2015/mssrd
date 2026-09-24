@@ -12,6 +12,8 @@
     "breastmnist": {"prediction": {"q": 7, "channels": 9, "latent_dimension": 144}, "empirical": {"q": 7, "channels": 9, "latent_dimension": 144}},
     "organamnist": {"prediction": {"q": 7, "channels": 30, "latent_dimension": 480}, "empirical": {"q": 7, "channels": 31, "latent_dimension": 496}},
     "retinamnist": {"prediction": {"q": 7, "channels": 6, "latent_dimension": 96}, "empirical": {"q": 7, "channels": 6, "latent_dimension": 96}},
-    "bloodmnist": {"prediction": {"q": 7, "channels": 13, "latent_dimension": 208}, "empirical": {"q": 7, "channels": 13, "latent_dimension": 208}}
+    "bloodmnist": {"prediction": {"q": 7, "channels": 13, "latent_dimension": 208}, "empirical": {"q": 7, "channels": 13, "latent_dimension": 208}},
+    "oxford_pets": {"prediction": {"q": 8, "channels": 10, "latent_dimension": 640}, "empirical": {"q": 8, "channels": 11, "latent_dimension": 704}},
+    "eurosat": {"prediction": {"q": 8, "channels": 8, "latent_dimension": 512}, "empirical": {"q": 8, "channels": 8, "latent_dimension": 512}}
   }
 }

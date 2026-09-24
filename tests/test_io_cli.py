@@ -52,4 +52,6 @@ def test_predict_cli_writes_json(tmp_path, capsys) -> None:
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["seed"] == 123
     assert payload["prediction"]["scale"] in {2, 4}
-    assert "MS-SRD prediction" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Minimum-latent MS-SRD candidate" in output
+    assert "Pareto scales" in output

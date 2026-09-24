@@ -76,6 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
     reproduce.add_argument("--steps", type=int, default=160)
     reproduce.add_argument("--batch-size", type=int, default=8192)
     reproduce.add_argument("--unet-steps", type=int, default=800)
+    reproduce.add_argument("--least-volume-steps", type=int, default=800)
     reproduce.add_argument("--unet-batch-size", type=int, default=256)
     reproduce.add_argument(
         "--unet-targets",
@@ -91,6 +92,8 @@ def _build_parser() -> argparse.ArgumentParser:
     reproduce.add_argument("--skip-unet-validation", action="store_true")
     reproduce.add_argument("--skip-full-skip-validation", action="store_true")
     reproduce.add_argument("--skip-true-bottleneck-validation", action="store_true")
+    reproduce.add_argument("--skip-geometry-stress", action="store_true")
+    reproduce.add_argument("--skip-deployable-baselines", action="store_true")
     reproduce.add_argument(
         "--quick",
         action="store_true",
@@ -121,9 +124,13 @@ def _predict(args: argparse.Namespace) -> int:
     payload = result.to_dict(include_eigenvalues=args.include_eigenvalues)
     prediction = result.prediction
     print(
-        "MS-SRD prediction: "
+        "Minimum-latent MS-SRD candidate: "
         f"{prediction.grid_height}x{prediction.grid_width}x{prediction.channels} "
         f"({prediction.latent_scalars} latent scalars, q={prediction.scale})"
+    )
+    print(
+        "Latent/parameter Pareto scales: "
+        + ", ".join(f"q={estimate.scale}" for estimate in result.pareto_frontier)
     )
     print(f"Estimated linear NMSE: {prediction.linear_nmse:.6f}")
     print(
@@ -158,6 +165,7 @@ def _reproduce(args: argparse.Namespace) -> int:
         args.bootstrap_reps = min(args.bootstrap_reps, 2)
         args.steps = min(args.steps, 40)
         args.unet_steps = min(args.unet_steps, 80)
+        args.least_volume_steps = min(args.least_volume_steps, 80)
         args.unet_batch_size = min(args.unet_batch_size, 128)
         args.unet_targets = tuple(target for target in args.unet_targets if target >= 0.05)
         args.skip_repeats = True
@@ -178,6 +186,7 @@ def _reproduce(args: argparse.Namespace) -> int:
         steps=args.steps,
         batch_size=args.batch_size,
         unet_steps=args.unet_steps,
+        least_volume_steps=args.least_volume_steps,
         unet_batch_size=args.unet_batch_size,
         unet_targets=args.unet_targets,
         device=args.device,
@@ -188,6 +197,8 @@ def _reproduce(args: argparse.Namespace) -> int:
         run_unet_validation=not args.skip_unet_validation,
         run_full_skip_validation=not args.skip_full_skip_validation,
         run_true_bottleneck_validation=not args.skip_true_bottleneck_validation,
+        run_geometry_stress_experiment=not args.skip_geometry_stress,
+        run_deployable_baseline_experiment=not args.skip_deployable_baselines,
     )
     return 0
 

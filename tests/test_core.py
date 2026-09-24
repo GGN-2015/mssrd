@@ -28,6 +28,14 @@ def test_known_rank_prediction_and_inverse() -> None:
     assert np.mean((images - reconstructed) ** 2) < 1e-20
 
 
+def test_pareto_frontier_balances_latent_scalars_and_shared_parameters() -> None:
+    result = predict_bottleneck(low_rank_images(), retained_variance=0.95, scales=[2, 4])
+    assert [estimate.scale for estimate in result.pareto_frontier] == [2, 4]
+    assert result.scales[0].linear_parameter_count == 2 * 4 * result.scales[0].channels
+    payload = result.to_dict()
+    assert payload["pareto_frontier_scales"] == [2, 4]
+
+
 def test_nmse_and_retained_variance_parameterizations_match() -> None:
     images = low_rank_images()
     direct = predict_bottleneck(images, target_nmse=0.05, scales=[2, 4], seed=11)
@@ -75,10 +83,24 @@ def test_joint_channel_mode_uses_color_dimensions() -> None:
     assert result.prediction.patch_dimension == 4 * 4 * 3
 
 
+def test_nondivisor_scale_is_zero_padded_and_cropped() -> None:
+    rng = np.random.default_rng(12)
+    images = rng.normal(size=(80, 7, 10))
+    estimator = MSSRD(retained_variance=1.0, scales=[4])
+    result = estimator.fit(images)
+    estimate = result.prediction
+    assert estimate.tensor_shape[:2] == (2, 3)
+    assert estimate.padding_bottom == 1
+    assert estimate.padding_right == 2
+    reconstructed = estimator.inverse_transform(estimator.transform(images))
+    assert reconstructed.shape == images.shape
+    np.testing.assert_allclose(reconstructed, images, rtol=1e-10, atol=1e-10)
+
+
 def test_invalid_scale_has_actionable_error() -> None:
     images = np.arange(5 * 7 * 8, dtype=np.float64).reshape(5, 7, 8)
-    with pytest.raises(ValueError, match="must divide"):
-        predict_bottleneck(images, scales=[4])
+    with pytest.raises(ValueError, match="no larger"):
+        predict_bottleneck(images, scales=[9])
 
 
 def test_unet_capacity_audit_counts_bypass_paths() -> None:
