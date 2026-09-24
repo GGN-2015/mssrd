@@ -28,6 +28,20 @@ def test_known_rank_prediction_and_inverse() -> None:
     assert np.mean((images - reconstructed) ** 2) < 1e-20
 
 
+def test_nmse_and_retained_variance_parameterizations_match() -> None:
+    images = low_rank_images()
+    direct = predict_bottleneck(images, target_nmse=0.05, scales=[2, 4], seed=11)
+    legacy = predict_bottleneck(images, retained_variance=0.95, scales=[2, 4], seed=11)
+    assert direct.prediction.tensor_shape == legacy.prediction.tensor_shape
+    with pytest.raises(ValueError, match="not both"):
+        predict_bottleneck(
+            images,
+            target_nmse=0.05,
+            retained_variance=0.95,
+            scales=[2, 4],
+        )
+
+
 def test_constant_features_are_counted_and_ignored() -> None:
     rng = np.random.default_rng(9)
     images = rng.normal(size=(80, 8, 8))

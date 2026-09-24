@@ -9,7 +9,12 @@ import torch
 
 from mssrd.core import ScaleEstimate
 from mssrd.paper.reproduce import _metrics, _paper_grayscale, _paper_scales
-from mssrd.paper.unet import build_unet_model, unet_candidates
+from mssrd.paper.unet import (
+    build_true_bottleneck_model,
+    build_unet_model,
+    true_bottleneck_candidate,
+    unet_candidates,
+)
 
 
 def test_paper_scales_match_protocol() -> None:
@@ -92,3 +97,28 @@ def test_unet_models_preserve_image_shape(role: str) -> None:
     model = build_unet_model(candidate, image_shape=(32, 32))
     output = model(torch.randn(2, 1, 32, 32))
     assert output.shape == (2, 1, 32, 32)
+
+
+def test_true_bottleneck_unet_has_no_input_dependent_skip_path() -> None:
+    candidate = true_bottleneck_candidate(3, scale=7, grid_height=4, grid_width=4)
+    model = build_true_bottleneck_model(candidate, image_shape=(28, 28), basis=np.zeros((49, 3)))
+    with torch.no_grad():
+        first = model(torch.randn(2, 1, 28, 28))
+        second = model(torch.randn(2, 1, 28, 28))
+    torch.testing.assert_close(first, second)
+
+
+def test_true_bottleneck_unet_starts_at_spectral_projection() -> None:
+    candidate = true_bottleneck_candidate(3, scale=7, grid_height=4, grid_width=4)
+    basis = np.eye(49, dtype=np.float32)[:, :3]
+    model = build_true_bottleneck_model(candidate, image_shape=(28, 28), basis=basis)
+    values = torch.randn(2, 1, 28, 28)
+    with torch.no_grad():
+        output = model(values)
+        patches = torch.nn.functional.unfold(values, kernel_size=7, stride=7)
+        latent = torch.matmul(patches.transpose(1, 2), model.basis)
+        projected = torch.matmul(latent, model.basis.transpose(0, 1)).transpose(1, 2)
+        expected = torch.nn.functional.fold(
+            projected, output_size=(28, 28), kernel_size=7, stride=7
+        )
+    torch.testing.assert_close(output, expected)

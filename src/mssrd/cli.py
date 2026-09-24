@@ -26,6 +26,16 @@ def _parse_scales(value: str) -> tuple[int, ...] | None:
     return scales
 
 
+def _parse_nmse_targets(value: str) -> tuple[float, ...]:
+    try:
+        targets = tuple(float(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("NMSE targets must be comma-separated numbers") from error
+    if not targets or any(not 0.0 < target < 1.0 for target in targets):
+        raise argparse.ArgumentTypeError("NMSE targets must lie in (0, 1)")
+    return tuple(sorted(set(targets), reverse=True))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mssrd",
@@ -37,7 +47,9 @@ def _build_parser() -> argparse.ArgumentParser:
     predict = subparsers.add_parser("predict", help="predict a bottleneck for an image dataset")
     predict.add_argument("input", type=Path, help="image directory, NPY, or NPZ dataset")
     predict.add_argument("--array-key", help="array key when reading NPZ")
-    predict.add_argument("--retained-variance", type=float, default=0.95)
+    distortion = predict.add_mutually_exclusive_group()
+    distortion.add_argument("--target-nmse", type=float, default=None)
+    distortion.add_argument("--retained-variance", type=float, default=None)
     predict.add_argument("--scales", type=_parse_scales, default=None, metavar="auto|2,4,8")
     predict.add_argument("--max-patch-size", type=int, default=8)
     predict.add_argument("--color-mode", choices=("grayscale", "channels"), default="grayscale")
@@ -65,12 +77,20 @@ def _build_parser() -> argparse.ArgumentParser:
     reproduce.add_argument("--batch-size", type=int, default=8192)
     reproduce.add_argument("--unet-steps", type=int, default=800)
     reproduce.add_argument("--unet-batch-size", type=int, default=256)
+    reproduce.add_argument(
+        "--unet-targets",
+        type=_parse_nmse_targets,
+        default=(0.10, 0.05, 0.02, 0.01),
+        help="comma-separated NMSE targets for the true-bottleneck U-Net sweep",
+    )
     reproduce.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     reproduce.add_argument("--no-download", action="store_true")
     reproduce.add_argument("--spectral-only", action="store_true")
     reproduce.add_argument("--unet-only", action="store_true")
     reproduce.add_argument("--skip-repeats", action="store_true")
     reproduce.add_argument("--skip-unet-validation", action="store_true")
+    reproduce.add_argument("--skip-full-skip-validation", action="store_true")
+    reproduce.add_argument("--skip-true-bottleneck-validation", action="store_true")
     reproduce.add_argument(
         "--quick",
         action="store_true",
@@ -87,6 +107,7 @@ def _predict(args: argparse.Namespace) -> int:
         seed=args.seed,
     )
     estimator = MSSRD(
+        target_nmse=args.target_nmse,
         retained_variance=args.retained_variance,
         scales=args.scales,
         max_patch_size=args.max_patch_size,
@@ -138,6 +159,7 @@ def _reproduce(args: argparse.Namespace) -> int:
         args.steps = min(args.steps, 40)
         args.unet_steps = min(args.unet_steps, 80)
         args.unet_batch_size = min(args.unet_batch_size, 128)
+        args.unet_targets = tuple(target for target in args.unet_targets if target >= 0.05)
         args.skip_repeats = True
     selected = (
         None
@@ -157,12 +179,15 @@ def _reproduce(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         unet_steps=args.unet_steps,
         unet_batch_size=args.unet_batch_size,
+        unet_targets=args.unet_targets,
         device=args.device,
         download=not args.no_download,
         spectral_only=args.spectral_only,
         unet_only=args.unet_only,
         run_repeats=not args.skip_repeats,
         run_unet_validation=not args.skip_unet_validation,
+        run_full_skip_validation=not args.skip_full_skip_validation,
+        run_true_bottleneck_validation=not args.skip_true_bottleneck_validation,
     )
     return 0
 

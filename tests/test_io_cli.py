@@ -42,6 +42,8 @@ def test_predict_cli_writes_json(tmp_path, capsys) -> None:
             "2,4",
             "--seed",
             "123",
+            "--target-nmse",
+            "0.05",
             "--output",
             str(output_path),
         ]

@@ -21,7 +21,16 @@ from matplotlib.ticker import LogLocator, NullFormatter
 from mssrd.core import MSSRD, MSSRDResult, ScaleEstimate
 from mssrd.paper.datasets import PAPER_DATASETS, PaperDataset, load_paper_dataset
 from mssrd.paper.model import coarse_channels, extract_patches, train_candidate
-from mssrd.paper.unet import UNET_PROTOCOL_VERSION, train_unet_candidate, unet_candidates
+from mssrd.paper.unet import (
+    TRUE_BOTTLENECK_PROTOCOL_VERSION,
+    UNET_PROTOCOL_VERSION,
+    train_true_bottleneck_candidate,
+    train_unet_candidate,
+    true_bottleneck_candidate,
+    unet_candidates,
+)
+
+UNET_NMSE_TARGETS = (0.10, 0.05, 0.02, 0.01)
 
 
 def _paper_scales(height: int, width: int) -> tuple[int, ...]:
@@ -402,6 +411,355 @@ def _unet_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _spectral_predictions_for_targets(
+    result: MSSRDResult, targets: Sequence[float]
+) -> list[dict[str, Any]]:
+    predictions: list[dict[str, Any]] = []
+    for target in targets:
+        if not 0.0 < target < 1.0:
+            raise ValueError("U-Net NMSE targets must lie in (0, 1)")
+        candidates: list[dict[str, Any]] = []
+        for estimate in result.scales:
+            eigenvalues = estimate.eigenvalues
+            total = float(eigenvalues.sum())
+            channels = int(np.searchsorted(np.cumsum(eigenvalues), (1.0 - target) * total) + 1)
+            channels = min(channels, estimate.patch_dimension)
+            latent_scalars = estimate.grid_height * estimate.grid_width * channels
+            linear_nmse = float(eigenvalues[channels:].sum() / total)
+            candidates.append(
+                {
+                    "target_nmse": float(target),
+                    "scale": estimate.scale,
+                    "grid_height": estimate.grid_height,
+                    "grid_width": estimate.grid_width,
+                    "patch_dimension": estimate.patch_dimension,
+                    "predicted_channels": channels,
+                    "predicted_latent_scalars": latent_scalars,
+                    "linear_nmse": linear_nmse,
+                }
+            )
+        predictions.append(
+            min(
+                candidates,
+                key=lambda row: (
+                    int(row["predicted_latent_scalars"]),
+                    int(row["scale"]),
+                ),
+            )
+        )
+    return predictions
+
+
+def _model_validation_split(images: np.ndarray, *, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    validation_size = min(1000, max(64, len(images) // 10), len(images) - 1)
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(images))
+    validation_indices = np.sort(order[:validation_size])
+    training_indices = np.sort(order[validation_size:])
+    return (
+        np.ascontiguousarray(images[training_indices]),
+        np.ascontiguousarray(images[validation_indices]),
+    )
+
+
+def _validate_true_bottleneck_unet(
+    *,
+    split: PaperDataset,
+    centered_train: np.ndarray,
+    centered_test: np.ndarray,
+    predictions: list[dict[str, Any]],
+    scale_estimates: Sequence[ScaleEstimate],
+    device: torch.device,
+    dataset_dir: Path,
+    seed: int,
+    steps: int,
+    batch_size: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    grids = {(int(row["grid_height"]), int(row["grid_width"])) for row in predictions}
+    if len(grids) != 1:
+        raise ValueError(
+            f"true-bottleneck U-Net requires one selected grid across targets; got {grids}"
+        )
+    grid_height, grid_width = next(iter(grids))
+    selected_scales = {int(row["scale"]) for row in predictions}
+    if len(selected_scales) != 1:
+        raise ValueError(
+            "true-bottleneck U-Net requires one spectral scale across targets; "
+            f"got {selected_scales}"
+        )
+    scale = next(iter(selected_scales))
+    estimate = next(item for item in scale_estimates if item.scale == scale)
+    maximum_channels = estimate.patch_dimension
+    model_train, model_validation = _model_validation_split(centered_train, seed=seed + 41000)
+    cache_path = dataset_dir / "true_bottleneck_cache.json"
+    cache: dict[str, dict[str, Any]] = {}
+    if cache_path.exists():
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+
+    def run(channels: int) -> dict[str, Any]:
+        candidate = true_bottleneck_candidate(
+            channels,
+            scale=scale,
+            grid_height=grid_height,
+            grid_width=grid_width,
+        )
+        slug_offset = sum((index + 1) * ord(value) for index, value in enumerate(split.slug))
+        candidate_seed = seed + 50000 + slug_offset + channels
+        key = (
+            f"v={TRUE_BOTTLENECK_PROTOCOL_VERSION}|{split.slug}|c={channels}|"
+            f"seed={candidate_seed}|steps={steps}|batch={batch_size}|"
+            f"train={len(model_train)}|validation={len(model_validation)}|"
+            f"test={len(centered_test)}"
+        )
+        if key not in cache:
+            metrics = train_true_bottleneck_candidate(
+                model_train,
+                model_validation,
+                centered_test,
+                candidate,
+                estimate.basis[:, :channels],
+                device=device,
+                seed=candidate_seed,
+                steps=steps,
+                batch_size=min(batch_size, len(model_train)),
+            )
+            cache[key] = {
+                "slug": split.slug,
+                "dataset": split.name,
+                "family": "true_bottleneck_unet",
+                **candidate.to_dict(),
+                "seed": candidate_seed,
+                "train_images": len(model_train),
+                "validation_images": len(model_validation),
+                "test_images": len(centered_test),
+                **metrics,
+            }
+            _write_json(cache_path, cache)
+            print(
+                f"[{split.slug}] true-bottleneck U-Net c={channels}: "
+                f"validation={metrics['validation_nmse']:.4f}, "
+                f"test={metrics['test_nmse']:.4f}",
+                flush=True,
+            )
+        return cache[key]
+
+    records_by_channel: dict[int, dict[str, Any]] = {}
+
+    def cached_run(channels: int) -> dict[str, Any]:
+        if channels not in records_by_channel:
+            records_by_channel[channels] = run(channels)
+        return records_by_channel[channels]
+
+    for channels in sorted({int(row["predicted_channels"]) for row in predictions}):
+        cached_run(channels)
+
+    boundary_channels: dict[float, int | None] = {}
+    for prediction in sorted(predictions, key=lambda row: float(row["target_nmse"]), reverse=True):
+        target = float(prediction["target_nmse"])
+        high = int(prediction["predicted_channels"])
+        if float(cached_run(high)["validation_nmse"]) > target:
+            high = maximum_channels
+        if float(cached_run(high)["validation_nmse"]) > target:
+            boundary_channels[target] = None
+            continue
+        low = 0
+        while high - low > 1:
+            middle = (low + high) // 2
+            if float(cached_run(middle)["validation_nmse"]) <= target:
+                high = middle
+            else:
+                low = middle
+        boundary_channels[target] = high
+
+    test_oracle_channels: dict[float, int | None] = {}
+    for prediction in sorted(predictions, key=lambda row: float(row["target_nmse"]), reverse=True):
+        target = float(prediction["target_nmse"])
+        high = int(prediction["predicted_channels"])
+        if float(cached_run(high)["test_nmse"]) > target:
+            high = maximum_channels
+        if float(cached_run(high)["test_nmse"]) > target:
+            test_oracle_channels[target] = None
+            continue
+        low = 0
+        while high - low > 1:
+            middle = (low + high) // 2
+            if float(cached_run(middle)["test_nmse"]) <= target:
+                high = middle
+            else:
+                low = middle
+        test_oracle_channels[target] = high
+    records = sorted(records_by_channel.values(), key=lambda row: int(row["channels"]))
+
+    boundaries: list[dict[str, Any]] = []
+    for prediction in predictions:
+        target = float(prediction["target_nmse"])
+        empirical_channels = boundary_channels[target]
+        empirical = (
+            records_by_channel[empirical_channels] if empirical_channels is not None else None
+        )
+        test_oracle_channel = test_oracle_channels[target]
+        test_oracle = (
+            records_by_channel[test_oracle_channel] if test_oracle_channel is not None else None
+        )
+        predicted_run = next(
+            row for row in records if int(row["channels"]) == int(prediction["predicted_channels"])
+        )
+        boundaries.append(
+            {
+                "slug": split.slug,
+                "dataset": split.name,
+                **prediction,
+                "empirical_channels": int(empirical["channels"]) if empirical else None,
+                "empirical_latent_scalars": (
+                    int(empirical["latent_scalars"]) if empirical else None
+                ),
+                "boundary_validation_nmse": (
+                    float(empirical["validation_nmse"]) if empirical else None
+                ),
+                "boundary_test_nmse": float(empirical["test_nmse"]) if empirical else None,
+                "boundary_test_passed": (
+                    bool(float(empirical["test_nmse"]) <= target) if empirical else None
+                ),
+                "test_oracle_channels": (
+                    int(test_oracle["channels"]) if test_oracle else None
+                ),
+                "test_oracle_latent_scalars": (
+                    int(test_oracle["latent_scalars"]) if test_oracle else None
+                ),
+                "test_oracle_nmse": float(test_oracle["test_nmse"]) if test_oracle else None,
+                "predicted_test_nmse": float(predicted_run["test_nmse"]),
+                "predicted_test_passed": bool(float(predicted_run["test_nmse"]) <= target),
+            }
+        )
+    return records, boundaries
+
+
+def _true_bottleneck_metrics(boundaries: list[dict[str, Any]]) -> dict[str, Any]:
+    complete = [row for row in boundaries if row["test_oracle_channels"] is not None]
+    if not complete:
+        return {}
+    predicted = np.asarray([float(row["predicted_channels"]) for row in complete])
+    empirical = np.asarray([float(row["test_oracle_channels"]) for row in complete])
+    ratios = empirical / predicted
+    dataset_count = len({str(row["slug"]) for row in complete})
+    calibrated: np.ndarray | None = None
+    if dataset_count > 1:
+        calibrated_predictions: list[int] = []
+        for row in complete:
+            calibration_rows = [
+                other
+                for other in complete
+                if other["slug"] != row["slug"]
+                and float(other["target_nmse"]) == float(row["target_nmse"])
+            ]
+            calibration_ratio = float(
+                np.median(
+                    [
+                        float(other["test_oracle_channels"])
+                        / float(other["predicted_channels"])
+                        for other in calibration_rows
+                    ]
+                )
+            )
+            calibrated_predictions.append(
+                max(1, int(np.ceil(calibration_ratio * float(row["predicted_channels"]))))
+            )
+        calibrated = np.asarray(calibrated_predictions, dtype=np.float64)
+    by_target: dict[str, Any] = {}
+    for target in sorted({float(row["target_nmse"]) for row in complete}, reverse=True):
+        selected = [row for row in complete if float(row["target_nmse"]) == target]
+        target_predicted = np.asarray(
+            [float(row["predicted_channels"]) for row in selected], dtype=np.float64
+        )
+        target_empirical = np.asarray(
+            [float(row["test_oracle_channels"]) for row in selected], dtype=np.float64
+        )
+        target_ratios = np.asarray(
+            [
+                float(row["test_oracle_channels"]) / float(row["predicted_channels"])
+                for row in selected
+            ]
+        )
+        target_calibrated: list[int] = []
+        if len(selected) > 1:
+            for row in selected:
+                other_ratios = [
+                    float(other["test_oracle_channels"])
+                    / float(other["predicted_channels"])
+                    for other in selected
+                    if other["slug"] != row["slug"]
+                ]
+                target_calibrated.append(
+                    max(
+                        1,
+                        int(
+                            np.ceil(
+                                float(np.median(other_ratios))
+                                * float(row["predicted_channels"])
+                            )
+                        ),
+                    )
+                )
+        validation_channels = np.asarray(
+            [float(row["empirical_channels"]) for row in selected], dtype=np.float64
+        )
+        by_target[f"{target:.3f}"] = {
+            "count": len(selected),
+            "median_empirical_to_mssrd_channel_ratio": float(np.median(target_ratios)),
+            "minimum_ratio": float(np.min(target_ratios)),
+            "maximum_ratio": float(np.max(target_ratios)),
+            "mssrd_channel_mape": float(
+                np.mean(np.abs(target_predicted - target_empirical) / target_empirical)
+            ),
+            "mssrd_channel_mae": float(np.mean(np.abs(target_predicted - target_empirical))),
+            "validation_boundary_channel_mape": float(
+                np.mean(np.abs(validation_channels - target_empirical) / target_empirical)
+            ),
+            "leave_one_dataset_out_calibrated_channel_mape": (
+                float(
+                    np.mean(
+                        np.abs(np.asarray(target_calibrated) - target_empirical)
+                        / target_empirical
+                    )
+                )
+                if target_calibrated
+                else None
+            ),
+            "leave_one_dataset_out_calibrated_channel_mae": (
+                float(np.mean(np.abs(np.asarray(target_calibrated) - target_empirical)))
+                if target_calibrated
+                else None
+            ),
+            "mssrd_prediction_test_pass_fraction": float(
+                np.mean([bool(row["predicted_test_passed"]) for row in selected])
+            ),
+            "validation_boundary_test_pass_fraction": float(
+                np.mean([bool(row["boundary_test_passed"]) for row in selected])
+            ),
+        }
+    return {
+        "dataset_count": dataset_count,
+        "target_count": len({float(row["target_nmse"]) for row in complete}),
+        "comparison_count": len(complete),
+        "mssrd_log_channel_pearson": (
+            float(np.corrcoef(np.log(predicted), np.log(empirical))[0, 1])
+            if len(complete) > 1 and np.ptp(predicted) > 0 and np.ptp(empirical) > 0
+            else None
+        ),
+        "median_empirical_to_mssrd_channel_ratio": float(np.median(ratios)),
+        "mssrd_channel_mape": float(np.mean(np.abs(predicted - empirical) / empirical)),
+        "leave_one_dataset_out_calibrated_channel_mape": (
+            float(np.mean(np.abs(calibrated - empirical) / empirical))
+            if calibrated is not None
+            else None
+        ),
+        "leave_one_dataset_out_calibrated_channel_mae": (
+            float(np.mean(np.abs(calibrated - empirical))) if calibrated is not None else None
+        ),
+        "by_target": by_target,
+    }
+
+
 def _summary_row(
     *,
     split: PaperDataset,
@@ -525,6 +883,8 @@ def _build_figures(
     runs: list[dict[str, Any]],
     repeats: list[dict[str, Any]],
     unet_runs: list[dict[str, Any]],
+    true_bottleneck_runs: list[dict[str, Any]],
+    true_bottleneck_boundaries: list[dict[str, Any]],
     spectra: dict[str, dict[int, np.ndarray]],
     output_dir: Path,
 ) -> None:
@@ -783,6 +1143,174 @@ def _build_figures(
         figure.savefig(figure_dir / "unet_validation.pdf")
         plt.close(figure)
 
+    if true_bottleneck_runs:
+        order = [str(row["slug"]) for row in summaries]
+        target_colors = {
+            0.10: "#0072b2",
+            0.05: "#009e73",
+            0.02: "#e69f00",
+            0.01: "#cc79a7",
+        }
+        figure, axes = plt.subplots(4, 3, figsize=(7.5, 8.8), constrained_layout=True)
+        for axis in axes.flat:
+            axis.set_visible(False)
+        for axis, slug in zip(axes.flat, order, strict=False):
+            axis.set_visible(True)
+            rows = sorted(
+                (row for row in true_bottleneck_runs if row["slug"] == slug),
+                key=lambda row: int(row["channels"]),
+            )
+            axis.plot(
+                [int(row["channels"]) for row in rows],
+                [float(row["test_nmse"]) for row in rows],
+                color="#333333",
+                marker="o",
+                markersize=2.5,
+                linewidth=0.8,
+            )
+            selected_boundaries = [row for row in true_bottleneck_boundaries if row["slug"] == slug]
+            for boundary in selected_boundaries:
+                target = float(boundary["target_nmse"])
+                color = target_colors.get(target, "#666666")
+                axis.axhline(target, color=color, linewidth=0.6, alpha=0.55)
+                if boundary["test_oracle_channels"] is not None:
+                    axis.scatter(
+                        [int(boundary["test_oracle_channels"])],
+                        [float(boundary["test_oracle_nmse"])],
+                        color=color,
+                        marker="o",
+                        s=18,
+                        zorder=3,
+                    )
+                axis.scatter(
+                    [int(boundary["predicted_channels"])],
+                    [float(boundary["predicted_test_nmse"])],
+                    facecolors="none",
+                    edgecolors=color,
+                    marker="s",
+                    s=22,
+                    linewidths=0.8,
+                    zorder=3,
+                )
+            axis.set(yscale="log", xlabel="Terminal channels", ylabel="Test NMSE", title=slug)
+            axis.set_ylim(5e-3, max(0.2, 1.15 * max(float(row["test_nmse"]) for row in rows)))
+            axis.grid(alpha=0.18, which="both")
+            axis.tick_params(labelsize=7)
+        handles = [
+            Line2D([], [], color=color, label=f"NMSE {target:g}")
+            for target, color in target_colors.items()
+        ]
+        handles.extend(
+            [
+                Line2D(
+                    [],
+                    [],
+                    marker="o",
+                    linestyle="None",
+                    color="#333333",
+                    label="retrospective test boundary",
+                ),
+                Line2D(
+                    [],
+                    [],
+                    marker="s",
+                    linestyle="None",
+                    markerfacecolor="none",
+                    markeredgecolor="#333333",
+                    label="MS-SRD width",
+                ),
+            ]
+        )
+        figure.legend(handles=handles, loc="outside lower center", ncol=3, frameon=False)
+        figure.savefig(figure_dir / "true_bottleneck_curves.png", dpi=220)
+        figure.savefig(figure_dir / "true_bottleneck_curves.pdf")
+        plt.close(figure)
+
+    complete_boundaries = [
+        row for row in true_bottleneck_boundaries if row["test_oracle_channels"] is not None
+    ]
+    if complete_boundaries:
+        target_colors = {
+            0.10: "#0072b2",
+            0.05: "#009e73",
+            0.02: "#e69f00",
+            0.01: "#cc79a7",
+        }
+        figure, (axis_scatter, axis_ratio) = plt.subplots(
+            1, 2, figsize=(7.5, 3.5), constrained_layout=True
+        )
+        maximum = max(
+            max(int(row["predicted_channels"]), int(row["test_oracle_channels"]))
+            for row in complete_boundaries
+        )
+        for target in sorted(target_colors, reverse=True):
+            rows = [row for row in complete_boundaries if float(row["target_nmse"]) == target]
+            color = target_colors[target]
+            axis_scatter.scatter(
+                [int(row["predicted_channels"]) for row in rows],
+                [int(row["test_oracle_channels"]) for row in rows],
+                color=color,
+                s=25,
+                label=f"NMSE {target:g}",
+            )
+            axis_ratio.scatter(
+                np.full(len(rows), target),
+                [
+                    int(row["test_oracle_channels"]) / int(row["predicted_channels"])
+                    for row in rows
+                ],
+                color=color,
+                s=22,
+                alpha=0.85,
+            )
+        median_targets = sorted(target_colors)
+        median_ratios = [
+            float(
+                np.median(
+                    [
+                        int(row["test_oracle_channels"]) / int(row["predicted_channels"])
+                        for row in complete_boundaries
+                        if float(row["target_nmse"]) == target
+                    ]
+                )
+            )
+            for target in median_targets
+        ]
+        axis_ratio.plot(
+            median_targets,
+            median_ratios,
+            color="#333333",
+            marker="D",
+            markersize=4,
+            linewidth=1.2,
+            label="median",
+        )
+        axis_scatter.plot(
+            [1, maximum], [1, maximum], color="#555555", linestyle="--", linewidth=0.9
+        )
+        axis_scatter.set(
+            xscale="log",
+            yscale="log",
+            xlabel="MS-SRD channels",
+            ylabel="Empirical U-Net channels",
+            title="True-bottleneck width",
+        )
+        axis_scatter.grid(alpha=0.2, which="both")
+        axis_scatter.legend(frameon=False, fontsize=7)
+        ordered_targets = sorted(target_colors, reverse=True)
+        axis_ratio.set(
+            xticks=ordered_targets,
+            xticklabels=[f"{target:g}" for target in ordered_targets],
+            xlabel="NMSE target",
+            ylabel="Empirical / MS-SRD channels",
+            title="Nonlinear width ratio",
+        )
+        axis_ratio.grid(axis="y", alpha=0.2)
+        axis_ratio.legend(frameon=False, fontsize=7)
+        figure.savefig(figure_dir / "unet_mssrd_relation.png", dpi=220)
+        figure.savefig(figure_dir / "unet_mssrd_relation.pdf")
+        plt.close(figure)
+
 
 def reproduce_paper(
     *,
@@ -798,12 +1326,15 @@ def reproduce_paper(
     batch_size: int = 8192,
     unet_steps: int = 800,
     unet_batch_size: int = 256,
+    unet_targets: Sequence[float] = UNET_NMSE_TARGETS,
     device: str = "auto",
     download: bool = True,
     spectral_only: bool = False,
     unet_only: bool = False,
     run_repeats: bool = True,
     run_unet_validation: bool = True,
+    run_full_skip_validation: bool = True,
+    run_true_bottleneck_validation: bool = True,
 ) -> list[dict[str, Any]]:
     """Reproduce spectral predictions, neural validation, and paper figures.
 
@@ -826,6 +1357,8 @@ def reproduce_paper(
     all_runs: list[dict[str, Any]] = []
     all_repeats: list[dict[str, Any]] = []
     all_unet_runs: list[dict[str, Any]] = []
+    all_true_bottleneck_runs: list[dict[str, Any]] = []
+    all_true_bottleneck_boundaries: list[dict[str, Any]] = []
     spectra: dict[str, dict[int, np.ndarray]] = {}
     for slug in selected:
         split = load_paper_dataset(
@@ -870,9 +1403,12 @@ def reproduce_paper(
             **{f"q{item.scale}_eigenvalues": item.eigenvalues for item in result.scales},
         )
         spectra[slug] = {item.scale: item.eigenvalues for item in result.scales}
+        target_predictions = _spectral_predictions_for_targets(result, unet_targets)
         empirical: dict[str, Any] | None = None
         dataset_runs: list[dict[str, Any]] = []
         dataset_unet_runs: list[dict[str, Any]] = []
+        dataset_true_bottleneck_runs: list[dict[str, Any]] = []
+        dataset_true_bottleneck_boundaries: list[dict[str, Any]] = []
         if not spectral_only:
             if not unet_only:
                 for estimate in result.scales:
@@ -919,7 +1455,7 @@ def reproduce_paper(
                     )
                     all_repeats.extend(repeated)
                     _write_csv(dataset_dir / "repeat_validation.csv", repeated)
-            if run_unet_validation:
+            if run_unet_validation and run_full_skip_validation:
                 dataset_unet_runs = _validate_unet(
                     split=split,
                     centered_train=centered_train,
@@ -933,11 +1469,39 @@ def reproduce_paper(
                 )
                 all_unet_runs.extend(dataset_unet_runs)
                 _write_csv(dataset_dir / "unet_runs.csv", dataset_unet_runs)
+            if run_unet_validation and run_true_bottleneck_validation:
+                (
+                    dataset_true_bottleneck_runs,
+                    dataset_true_bottleneck_boundaries,
+                ) = _validate_true_bottleneck_unet(
+                    split=split,
+                    centered_train=centered_train,
+                    centered_test=centered_test,
+                    predictions=target_predictions,
+                    scale_estimates=result.scales,
+                    device=training_device,
+                    dataset_dir=dataset_dir,
+                    seed=seed,
+                    steps=unet_steps,
+                    batch_size=unet_batch_size,
+                )
+                all_true_bottleneck_runs.extend(dataset_true_bottleneck_runs)
+                all_true_bottleneck_boundaries.extend(dataset_true_bottleneck_boundaries)
+                _write_csv(
+                    dataset_dir / "true_bottleneck_runs.csv",
+                    dataset_true_bottleneck_runs,
+                )
+                _write_csv(
+                    dataset_dir / "true_bottleneck_boundaries.csv",
+                    dataset_true_bottleneck_boundaries,
+                )
         summary = _summary_row(split=split, result=result, bootstrap=bootstrap, empirical=empirical)
         if dataset_unet_runs:
             summary["unet_validation"] = _unet_dataset_summary(
                 dataset_unet_runs, result.prediction.latent_scalars
             )
+        if dataset_true_bottleneck_boundaries:
+            summary["true_bottleneck_unet"] = dataset_true_bottleneck_boundaries
         summaries.append(summary)
         _write_json(dataset_dir / "summary.json", summary)
         del train, test, centered_train, centered_test
@@ -947,17 +1511,23 @@ def reproduce_paper(
     _write_csv(output / "training_runs.csv", all_runs)
     _write_csv(output / "repeat_validation.csv", all_repeats)
     _write_csv(output / "unet_runs.csv", all_unet_runs)
+    _write_csv(output / "true_bottleneck_runs.csv", all_true_bottleneck_runs)
+    _write_csv(output / "true_bottleneck_boundaries.csv", all_true_bottleneck_boundaries)
     reference_check = _reference_check(summaries, seed=seed, max_train=max_train, max_test=max_test)
     _write_json(output / "reference_check.json", reference_check)
     metrics = _metrics(summaries, all_repeats)
     _write_json(output / "metrics.json", metrics)
     unet_metrics = _unet_metrics(all_unet_runs)
     _write_json(output / "unet_metrics.json", unet_metrics)
+    true_bottleneck_metrics = _true_bottleneck_metrics(all_true_bottleneck_boundaries)
+    _write_json(output / "true_bottleneck_metrics.json", true_bottleneck_metrics)
     _build_figures(
         summaries,
         all_runs,
         all_repeats,
         all_unet_runs,
+        all_true_bottleneck_runs,
+        all_true_bottleneck_boundaries,
         spectra,
         output,
     )

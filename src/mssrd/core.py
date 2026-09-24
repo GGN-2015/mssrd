@@ -284,9 +284,12 @@ class MSSRD:
 
     Parameters
     ----------
+    target_nmse:
+        Requested linear NMSE budget. The default is ``0.05``. This is the
+        direct parameterization of the distortion constraint.
     retained_variance:
-        Target patch-energy fraction. ``0.95`` corresponds to linear NMSE at
-        most ``0.05``.
+        Backward-compatible complement of ``target_nmse``. Specify at most one
+        of these arguments.
     scales:
         Candidate square patch sizes. If omitted, all common divisors from 2
         through ``max_patch_size`` are used.
@@ -302,7 +305,8 @@ class MSSRD:
     def __init__(
         self,
         *,
-        retained_variance: float = 0.95,
+        target_nmse: float | None = None,
+        retained_variance: float | None = None,
         scales: Sequence[int] | None = None,
         max_patch_size: int = 8,
         color_mode: str = "grayscale",
@@ -313,6 +317,15 @@ class MSSRD:
         compute_global: bool = False,
         variance_epsilon: float = 1e-12,
     ) -> None:
+        if target_nmse is not None and retained_variance is not None:
+            raise ValueError("specify target_nmse or retained_variance, not both")
+        if target_nmse is None and retained_variance is None:
+            target_nmse = 0.05
+        if target_nmse is not None:
+            if not 0.0 <= target_nmse < 1.0:
+                raise ValueError("target_nmse must be in [0, 1)")
+            retained_variance = 1.0 - target_nmse
+        assert retained_variance is not None
         if not 0.0 < retained_variance <= 1.0:
             raise ValueError("retained_variance must be in (0, 1]")
         if max_patch_size < 1 or batch_size < 1:
@@ -468,7 +481,8 @@ class MSSRD:
 def predict_bottleneck(
     images: ArrayLike,
     *,
-    retained_variance: float = 0.95,
+    target_nmse: float | None = None,
+    retained_variance: float | None = None,
     scales: Iterable[int] | None = None,
     max_patch_size: int = 8,
     color_mode: str = "grayscale",
@@ -480,6 +494,7 @@ def predict_bottleneck(
     """Functional convenience wrapper around :class:`MSSRD`."""
 
     estimator = MSSRD(
+        target_nmse=target_nmse,
         retained_variance=retained_variance,
         scales=tuple(scales) if scales is not None else None,
         max_patch_size=max_patch_size,

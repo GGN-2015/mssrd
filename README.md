@@ -3,8 +3,8 @@
 MS-SRD (Multiscale Spectral Rate-Distortion) predicts a convolutional autoencoder
 bottleneck tensor directly from an image dataset, before a neural network is trained.
 It estimates covariance spectra of local image patches at several spatial scales,
-finds the channel count that retains a requested fraction of patch variance, and
-selects the tensor with the fewest latent scalars.
+finds the smallest channel count whose linear reconstruction meets a requested NMSE
+budget, and selects the tensor with the fewest latent scalars.
 
 The package provides:
 
@@ -15,23 +15,24 @@ The package provides:
 - a one-command reproduction of the twelve-dataset paper experiment;
 - PCA-initialized nonlinear PyTorch validation, bootstraps, repeat seeds, CSV/JSON
   results, and publication figures;
-- a controlled U-Net skip-path validation and a structural capacity audit for custom
-  U-Net layouts.
+- a true-bottleneck U-Net sweep, a full-skip control, and a structural capacity audit
+  for custom U-Net layouts.
 
 ## Scope
 
-MS-SRD operationalizes "retain 95% of the information" as retaining 95% of centered
-pixel variance, equivalently a linear normalized mean-squared error (NMSE) no larger
-than 0.05. This is an MSE criterion. It is not a claim about semantic information,
-perceptual quality, or downstream task accuracy.
+MS-SRD takes an NMSE budget as a modeling choice. The paper reports 0.05 as its primary
+operating point for continuity with variance-threshold dimension selection and tests
+sensitivity at 0.10, 0.05, 0.02, and 0.01. No one threshold is universally correct:
+the appropriate budget depends on the reconstruction loss, data scale, and downstream
+use. The criterion concerns centered pixel MSE, not perceptual quality or task accuracy.
 
 The exact theorem applies to a shared linear non-overlapping block-convolutional
-autoencoder. The included paper experiment tests a PCA-initialized nonlinear extension
-without skip connections. A full U-Net is different: its encoder-to-decoder skip paths
-bypass the terminal bottleneck, so the terminal tensor alone is not the model's global
-information bottleneck. For U-Nets, use MS-SRD as a prior for a constrained bottleneck
-or account explicitly for every skip path. Predictions for perceptual losses or
-high-resolution color models likewise remain architecture priors that require validation.
+autoencoder. The paper also tests a nonlinear U-shaped autoencoder in which every
+sample-dependent encoder-to-decoder skip is closed, so all image content crosses one
+terminal tensor. A conventional full-skip U-Net is a control: its skip paths bypass the
+terminal tensor, which therefore is not a global bottleneck. Predictions for perceptual
+losses or high-resolution color models remain architecture priors that require
+validation.
 
 ## Installation
 
@@ -78,11 +79,14 @@ Analyze a directory recursively containing PNG, JPEG, TIFF, BMP, or WebP images:
 ```bash
 uv run mssrd predict ./my-images \
   --seed 42 \
-  --retained-variance 0.95 \
+  --target-nmse 0.05 \
   --scales 2,4,8 \
   --output result.json \
   --plot spectra.png
 ```
+
+Change `--target-nmse` to match the application's distortion requirement. The legacy
+spelling `--retained-variance 0.95` is equivalent to `--target-nmse 0.05`.
 
 Analyze a NumPy array with shape `(N,H,W)`, `(N,H,W,C)`, or `(N,C,H,W)`:
 
@@ -121,7 +125,7 @@ images = np.load("images.npy")
 
 result = predict_bottleneck(
     images,
-    retained_variance=0.95,
+    target_nmse=0.05,
     scales=[2, 4, 8],
     seed=42,
 )
@@ -135,7 +139,7 @@ Use the estimator object when the analytic mapping and inverse mapping are neede
 
 ```python
 estimator = MSSRD(
-    retained_variance=0.95,
+    target_nmse=0.05,
     scales=[2, 4, 8],
     color_mode="grayscale",
     seed=42,
@@ -194,10 +198,13 @@ The default run performs all of the following:
 2. twenty image-level bootstrap repetitions per dataset;
 3. PCA-initialized nonlinear bottleneck searches at every paper scale;
 4. empirical-boundary, one-channel-below, and predicted runs at two additional seeds;
-5. full-skip U-Net runs with a zeroed terminal bottleneck, one terminal channel, and the
+5. a true-bottleneck U-Net width search at NMSE budgets 0.10, 0.05, 0.02, and 0.01,
+   using a training/validation split for deployable selection and a separately labeled,
+   retrospective test-set boundary for analysis;
+6. full-skip U-Net controls with a zeroed terminal tensor, one terminal channel, and the
    MS-SRD-predicted channel count;
-6. comparison against the committed paper reference predictions;
-7. JSON, CSV, NumPy spectrum archives, and PDF/PNG figures.
+7. comparison against the committed paper reference predictions;
+8. JSON, CSV, NumPy spectrum archives, and PDF/PNG figures.
 
 The neural candidate cache is stored below each dataset result directory. Re-running the
 same command resumes an interrupted experiment instead of retraining completed
@@ -208,6 +215,11 @@ The patch experiment uses at most 20,000 training images, 5,000 held-out images,
 experiment uses 800 image-level optimizer steps per candidate with a default batch size
 of 256. CUDA is used automatically when available. Force a device with `--device cpu`
 or `--device cuda`.
+
+In `true_bottleneck_boundaries.csv`, `predicted_channels` is the training-free MS-SRD
+output, `empirical_channels` is selected on the validation split, and
+`test_oracle_channels` is a retrospective test-set crossing reported only for analysis.
+Do not use the test oracle as a deployment-time selector.
 
 Useful shorter runs:
 
@@ -221,8 +233,12 @@ uv run mssrd reproduce-paper --datasets optdigits --quick
 # Reproduce only selected datasets.
 uv run mssrd reproduce-paper --datasets mnist,cifar10,bloodmnist
 
-# Run only the U-Net skip-path experiment (plus the required spectral predictions).
+# Run both U-Net experiments (plus the required spectral predictions).
 uv run mssrd reproduce-paper --unet-only --skip-repeats --device cuda
+
+# Run only the true-bottleneck sweep at selected distortion budgets.
+uv run mssrd reproduce-paper --unet-only --skip-repeats \
+  --skip-full-skip-validation --unet-targets 0.10,0.05,0.02,0.01 --device cuda
 ```
 
 The default spectral predictions are:
@@ -258,6 +274,9 @@ paper-results/
   repeat_validation.csv
   unet_runs.csv
   unet_metrics.json
+  true_bottleneck_runs.csv
+  true_bottleneck_boundaries.csv
+  true_bottleneck_metrics.json
   metrics.json
   reference_check.json
   figures/
@@ -269,6 +288,9 @@ paper-results/
     repeat_validation.csv
     unet_cache.json
     unet_runs.csv
+    true_bottleneck_cache.json
+    true_bottleneck_runs.csv
+    true_bottleneck_boundaries.csv
 ```
 
 The six MedMNIST subsets are downloaded through the official MedMNIST API. MNIST,
@@ -295,10 +317,11 @@ also exercised before a release by running the twelve datasets against
 ## Method summary
 
 For a square patch scale `q`, let the pooled centered patch covariance have eigenvalues
-`lambda_1 >= ... >= lambda_d`. MS-SRD chooses the smallest channel count `c_q` for which
+`lambda_1 >= ... >= lambda_d`, and let `delta` be the requested NMSE budget. MS-SRD
+chooses the smallest channel count `c_q` for which
 
 ```text
-sum(lambda_1 ... lambda_cq) / sum(lambda_1 ... lambda_d) >= eta.
+sum(lambda_(cq+1) ... lambda_d) / sum(lambda_1 ... lambda_d) <= delta.
 ```
 
 There are `(H/q)(W/q)` spatial positions, so the candidate scalar count is
