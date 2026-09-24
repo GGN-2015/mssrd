@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from mssrd import MSSRD, predict_bottleneck
+
+
+def low_rank_images(seed: int = 4) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    raw_basis = rng.normal(size=(16, 2))
+    basis, _ = np.linalg.qr(raw_basis)
+    coefficients = rng.normal(size=(240, 2, 2, 2))
+    patches = coefficients @ basis.T
+    return patches.reshape(240, 2, 2, 4, 4).transpose(0, 1, 3, 2, 4).reshape(240, 8, 8)
+
+
+def test_known_rank_prediction_and_inverse() -> None:
+    images = low_rank_images()
+    estimator = MSSRD(retained_variance=0.95, scales=[2, 4], seed=11)
+    result = estimator.fit(images)
+    assert result.prediction.scale == 4
+    assert result.prediction.channels == 2
+    assert result.prediction.tensor_shape == (2, 2, 2)
+    latent = estimator.transform(images)
+    reconstructed = estimator.inverse_transform(latent)
+    assert latent.shape == (240, 2, 2, 2)
+    assert np.mean((images - reconstructed) ** 2) < 1e-20
+
+
+def test_constant_features_are_counted_and_ignored() -> None:
+    rng = np.random.default_rng(9)
+    images = rng.normal(size=(80, 8, 8))
+    images[:, 0, :] = 3.0
+    result = predict_bottleneck(images, scales=[2, 4], seed=9)
+    assert result.constant_input_features == 8
+    assert result.nonconstant_input_features == 56
+
+
+def test_all_constant_dataset_is_rejected() -> None:
+    with pytest.raises(ValueError, match="all input features are constant"):
+        predict_bottleneck(np.ones((10, 8, 8)), scales=[2, 4])
+
+
+def test_nchw_and_nhwc_color_inputs_match_in_grayscale() -> None:
+    rng = np.random.default_rng(3)
+    nhwc = rng.integers(0, 256, size=(40, 8, 8, 3), dtype=np.uint8)
+    nchw = np.moveaxis(nhwc, -1, 1)
+    first = predict_bottleneck(nhwc, scales=[2, 4], seed=3)
+    second = predict_bottleneck(nchw, scales=[2, 4], channel_axis=1, seed=3)
+    assert first.prediction.tensor_shape == second.prediction.tensor_shape
+    np.testing.assert_allclose(
+        first.prediction.eigenvalues, second.prediction.eigenvalues, rtol=1e-12, atol=1e-12
+    )
+
+
+def test_joint_channel_mode_uses_color_dimensions() -> None:
+    rng = np.random.default_rng(8)
+    images = rng.normal(size=(50, 8, 8, 3))
+    result = predict_bottleneck(images, scales=[4], color_mode="channels")
+    assert result.prediction.patch_dimension == 4 * 4 * 3
+
+
+def test_invalid_scale_has_actionable_error() -> None:
+    images = np.arange(5 * 7 * 8, dtype=np.float64).reshape(5, 7, 8)
+    with pytest.raises(ValueError, match="must divide"):
+        predict_bottleneck(images, scales=[4])

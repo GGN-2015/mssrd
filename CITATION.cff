@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use MS-SRD, please cite this software and the accompanying preprint."
+title: "MS-SRD: Multiscale Spectral Rate-Distortion"
+type: software
+version: 0.1.0
+date-released: 2026-09-24
+authors:
+  - name: "GGN_2015"
+repository-code: "https://github.com/GGN-2015/mssrd"
+license: MIT

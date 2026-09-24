@@ -1,0 +1,18 @@
+{
+  "paper_seed": 20260924,
+  "retained_variance": 0.95,
+  "datasets": {
+    "mnist": {"prediction": {"q": 7, "channels": 22, "latent_dimension": 352}, "empirical": {"q": 7, "channels": 19, "latent_dimension": 304}},
+    "kmnist": {"prediction": {"q": 7, "channels": 21, "latent_dimension": 336}, "empirical": {"q": 7, "channels": 19, "latent_dimension": 304}},
+    "optdigits": {"prediction": {"q": 8, "channels": 29, "latent_dimension": 29}, "empirical": {"q": 8, "channels": 23, "latent_dimension": 23}},
+    "fashion_mnist": {"prediction": {"q": 7, "channels": 20, "latent_dimension": 320}, "empirical": {"q": 7, "channels": 19, "latent_dimension": 304}},
+    "cifar10": {"prediction": {"q": 8, "channels": 13, "latent_dimension": 208}, "empirical": {"q": 8, "channels": 13, "latent_dimension": 208}},
+    "cifar100": {"prediction": {"q": 8, "channels": 12, "latent_dimension": 192}, "empirical": {"q": 8, "channels": 12, "latent_dimension": 192}},
+    "chestmnist": {"prediction": {"q": 7, "channels": 7, "latent_dimension": 112}, "empirical": {"q": 7, "channels": 7, "latent_dimension": 112}},
+    "pneumoniamnist": {"prediction": {"q": 7, "channels": 10, "latent_dimension": 160}, "empirical": {"q": 7, "channels": 11, "latent_dimension": 176}},
+    "breastmnist": {"prediction": {"q": 7, "channels": 9, "latent_dimension": 144}, "empirical": {"q": 7, "channels": 9, "latent_dimension": 144}},
+    "organamnist": {"prediction": {"q": 7, "channels": 30, "latent_dimension": 480}, "empirical": {"q": 7, "channels": 31, "latent_dimension": 496}},
+    "retinamnist": {"prediction": {"q": 7, "channels": 6, "latent_dimension": 96}, "empirical": {"q": 7, "channels": 6, "latent_dimension": 96}},
+    "bloodmnist": {"prediction": {"q": 7, "channels": 13, "latent_dimension": 208}, "empirical": {"q": 7, "channels": 13, "latent_dimension": 208}}
+  }
+}

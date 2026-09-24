@@ -209,6 +209,10 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Local datasets and generated paper artifacts
+data/
+paper-results/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
