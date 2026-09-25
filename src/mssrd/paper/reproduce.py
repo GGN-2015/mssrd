@@ -30,6 +30,9 @@ from mssrd.paper.unet import (
     unet_candidates,
 )
 
+plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["ps.fonttype"] = 42
+
 UNET_NMSE_TARGETS = (0.01, 0.02, 0.05, 0.10)
 PRIMARY_NMSE_TARGET = 0.01
 

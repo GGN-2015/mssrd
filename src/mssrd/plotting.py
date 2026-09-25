@@ -18,6 +18,8 @@ def plot_spectra(result: MSSRDResult, path: str | Path) -> None:
         raise RuntimeError(
             "matplotlib is required but is not available in this installation"
         ) from error
+    plt.rcParams["pdf.fonttype"] = 42
+    plt.rcParams["ps.fonttype"] = 42
     figure, axis = plt.subplots(figsize=(7.0, 4.2), constrained_layout=True)
     for estimate in result.scales:
         values = estimate.eigenvalues

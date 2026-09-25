@@ -12,6 +12,9 @@ import matplotlib.pyplot as plt
 from mssrd.core import MSSRD
 from mssrd.paper.datasets import load_oxford_pets_geometry
 
+plt.rcParams["pdf.fonttype"] = 42
+plt.rcParams["ps.fonttype"] = 42
+
 GEOMETRIES = ((48, 64), (64, 64), (64, 96))
 GEOMETRY_SCALES = (4, 8, 12, 16)
 
