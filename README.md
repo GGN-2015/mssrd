@@ -22,11 +22,10 @@ The package provides:
 
 ## Scope
 
-MS-SRD takes an NMSE budget as a modeling choice. The paper reports 0.05 as its primary
-operating point for continuity with variance-threshold dimension selection and tests
-sensitivity at 0.10, 0.05, 0.02, and 0.01. No one threshold is universally correct:
-the appropriate budget depends on the reconstruction loss, data scale, and downstream
-use. The criterion concerns centered pixel MSE, not perceptual quality or task accuracy.
+MS-SRD takes an NMSE budget as a modeling choice. The paper uses 0.01 as its primary
+operating point and tests sensitivity at 0.02, 0.05, and 0.10. The appropriate budget
+depends on the reconstruction loss, data scale, and downstream use; the criterion here
+concerns centered pixel MSE, not perceptual quality or task accuracy.
 
 The exact theorem applies to a shared linear non-overlapping block-convolutional
 autoencoder. The paper also tests a nonlinear U-shaped autoencoder in which every
@@ -81,14 +80,14 @@ Analyze a directory recursively containing PNG, JPEG, TIFF, BMP, or WebP images:
 ```bash
 uv run mssrd predict ./my-images \
   --seed 42 \
-  --target-nmse 0.05 \
+  --target-nmse 0.01 \
   --scales 2,4,8 \
   --output result.json \
   --plot spectra.png
 ```
 
 Change `--target-nmse` to match the application's distortion requirement. The legacy
-spelling `--retained-variance 0.95` is equivalent to `--target-nmse 0.05`.
+spelling `--retained-variance 0.99` is equivalent to `--target-nmse 0.01`.
 
 Analyze a NumPy array with shape `(N,H,W)`, `(N,H,W,C)`, or `(N,C,H,W)`:
 
@@ -129,7 +128,7 @@ images = np.load("images.npy")
 
 result = predict_bottleneck(
     images,
-    target_nmse=0.05,
+    target_nmse=0.01,
     scales=[2, 4, 8],
     seed=42,
 )
@@ -144,7 +143,7 @@ Use the estimator object when the analytic mapping and inverse mapping are neede
 
 ```python
 estimator = MSSRD(
-    target_nmse=0.05,
+    target_nmse=0.01,
     scales=[2, 4, 8],
     color_mode="grayscale",
     seed=42,
@@ -204,7 +203,7 @@ The default run performs all of the following:
 2. twenty image-level bootstrap repetitions per dataset;
 3. PCA-initialized nonlinear bottleneck searches at every paper scale;
 4. empirical-boundary, one-channel-below, and predicted runs at two additional seeds;
-5. a true-bottleneck U-Net width search at NMSE budgets 0.10, 0.05, 0.02, and 0.01,
+5. a true-bottleneck U-Net width search at NMSE budgets 0.01, 0.02, 0.05, and 0.10,
    using a training/validation split for deployable selection and a separately labeled,
    retrospective test-set boundary for analysis;
 6. full-skip U-Net controls with a zeroed terminal tensor, one terminal channel, and the
@@ -254,26 +253,26 @@ uv run mssrd reproduce-paper --unet-only --skip-repeats --device cuda
 
 # Run only the true-bottleneck sweep at selected distortion budgets.
 uv run mssrd reproduce-paper --unet-only --skip-repeats \
-  --skip-full-skip-validation --unet-targets 0.10,0.05,0.02,0.01 --device cuda
+  --skip-full-skip-validation --unet-targets 0.01,0.02,0.05,0.10 --device cuda
 ```
 
 The default spectral predictions are:
 
 | Dataset | Predicted tensor | Latent scalars |
 |---|---:|---:|
-| MNIST | 4 x 4 x 22 | 352 |
-| KMNIST | 4 x 4 x 21 | 336 |
-| Fashion-MNIST | 4 x 4 x 20 | 320 |
-| CIFAR-10 | 4 x 4 x 13 | 208 |
-| CIFAR-100 | 4 x 4 x 12 | 192 |
-| ChestMNIST | 4 x 4 x 7 | 112 |
-| PneumoniaMNIST | 4 x 4 x 10 | 160 |
-| BreastMNIST | 4 x 4 x 9 | 144 |
-| OrganAMNIST | 4 x 4 x 30 | 480 |
-| RetinaMNIST | 4 x 4 x 6 | 96 |
-| BloodMNIST | 4 x 4 x 13 | 208 |
-| Oxford-IIIT Pet | 8 x 8 x 10 | 640 |
-| EuroSAT | 8 x 8 x 8 | 512 |
+| MNIST | 4 x 4 x 38 | 608 |
+| KMNIST | 4 x 4 x 37 | 592 |
+| Fashion-MNIST | 4 x 4 x 37 | 592 |
+| CIFAR-10 | 4 x 4 x 32 | 512 |
+| CIFAR-100 | 4 x 4 x 30 | 480 |
+| ChestMNIST | 4 x 4 x 17 | 272 |
+| PneumoniaMNIST | 4 x 4 x 24 | 384 |
+| BreastMNIST | 4 x 4 x 22 | 352 |
+| OrganAMNIST | 4 x 4 x 45 | 720 |
+| RetinaMNIST | 4 x 4 x 18 | 288 |
+| BloodMNIST | 4 x 4 x 28 | 448 |
+| Oxford-IIIT Pet | 8 x 8 x 33 | 2112 |
+| EuroSAT | 8 x 8 x 26 | 1664 |
 
 `paper-results/reference_check.json` states whether a default spectral run exactly
 matches these committed predictions. Small floating-point differences in nonlinear GPU

@@ -79,6 +79,12 @@ def _build_parser() -> argparse.ArgumentParser:
     reproduce.add_argument("--least-volume-steps", type=int, default=800)
     reproduce.add_argument("--unet-batch-size", type=int, default=256)
     reproduce.add_argument(
+        "--target-nmse",
+        type=float,
+        default=0.01,
+        help="primary NMSE target for the paper experiment (default: 0.01)",
+    )
+    reproduce.add_argument(
         "--unet-targets",
         type=_parse_nmse_targets,
         default=(0.10, 0.05, 0.02, 0.01),
@@ -167,7 +173,7 @@ def _reproduce(args: argparse.Namespace) -> int:
         args.unet_steps = min(args.unet_steps, 80)
         args.least_volume_steps = min(args.least_volume_steps, 80)
         args.unet_batch_size = min(args.unet_batch_size, 128)
-        args.unet_targets = tuple(target for target in args.unet_targets if target >= 0.05)
+        args.unet_targets = (args.target_nmse,)
         args.skip_repeats = True
     selected = (
         None
@@ -189,6 +195,7 @@ def _reproduce(args: argparse.Namespace) -> int:
         least_volume_steps=args.least_volume_steps,
         unet_batch_size=args.unet_batch_size,
         unet_targets=args.unet_targets,
+        target_nmse=args.target_nmse,
         device=args.device,
         download=not args.no_download,
         spectral_only=args.spectral_only,

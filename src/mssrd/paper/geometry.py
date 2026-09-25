@@ -30,6 +30,7 @@ def run_geometry_stress(
     seed: int,
     max_train: int = 3680,
     download: bool = True,
+    target_nmse: float = 0.01,
 ) -> list[dict[str, Any]]:
     """Measure the activation/parameter frontier under controlled image geometries."""
 
@@ -45,7 +46,7 @@ def run_geometry_stress(
             download=download,
         )
         result = MSSRD(
-            target_nmse=0.05,
+            target_nmse=target_nmse,
             scales=GEOMETRY_SCALES,
             color_mode="grayscale",
             seed=seed,

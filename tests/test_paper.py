@@ -73,13 +73,13 @@ def test_reference_manifest_contains_thirteen_datasets() -> None:
     assert len(reference["datasets"]) == 13
     assert reference["datasets"]["cifar10"]["prediction"] == {
         "q": 8,
-        "channels": 13,
-        "latent_dimension": 208,
+        "channels": 32,
+        "latent_dimension": 512,
     }
     assert reference["datasets"]["oxford_pets"]["prediction"] == {
         "q": 8,
-        "channels": 10,
-        "latent_dimension": 640,
+        "channels": 33,
+        "latent_dimension": 2112,
     }
 
 

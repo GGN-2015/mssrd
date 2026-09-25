@@ -324,7 +324,7 @@ class MSSRD:
     Parameters
     ----------
     target_nmse:
-        Requested linear NMSE budget. The default is ``0.05``. This is the
+        Requested linear NMSE budget. The default is ``0.01``. This is the
         direct parameterization of the distortion constraint.
     retained_variance:
         Backward-compatible complement of ``target_nmse``. Specify at most one
@@ -360,7 +360,7 @@ class MSSRD:
         if target_nmse is not None and retained_variance is not None:
             raise ValueError("specify target_nmse or retained_variance, not both")
         if target_nmse is None and retained_variance is None:
-            target_nmse = 0.05
+            target_nmse = 0.01
         if target_nmse is not None:
             if not 0.0 <= target_nmse < 1.0:
                 raise ValueError("target_nmse must be in [0, 1)")

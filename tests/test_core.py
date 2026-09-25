@@ -38,8 +38,10 @@ def test_pareto_frontier_balances_latent_scalars_and_shared_parameters() -> None
 
 def test_nmse_and_retained_variance_parameterizations_match() -> None:
     images = low_rank_images()
+    default = predict_bottleneck(images, scales=[2, 4], seed=11)
     direct = predict_bottleneck(images, target_nmse=0.05, scales=[2, 4], seed=11)
     legacy = predict_bottleneck(images, retained_variance=0.95, scales=[2, 4], seed=11)
+    assert default.retained_variance == pytest.approx(0.99)
     assert direct.prediction.tensor_shape == legacy.prediction.tensor_shape
     with pytest.raises(ValueError, match="not both"):
         predict_bottleneck(

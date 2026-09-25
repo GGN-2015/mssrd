@@ -30,7 +30,8 @@ from mssrd.paper.unet import (
     unet_candidates,
 )
 
-UNET_NMSE_TARGETS = (0.10, 0.05, 0.02, 0.01)
+UNET_NMSE_TARGETS = (0.01, 0.02, 0.05, 0.10)
+PRIMARY_NMSE_TARGET = 0.01
 
 
 def _paper_scales(height: int, width: int) -> tuple[int, ...]:
@@ -186,7 +187,10 @@ def _validate_scale(
                 f"NMSE {metrics['initial_nmse']:.4f} -> {metrics['final_nmse']:.4f}",
                 flush=True,
             )
-        return cache[key]
+        row = dict(cache[key])
+        row["target_nmse"] = target_nmse
+        row["passed"] = bool(float(row["final_nmse"]) <= target_nmse)
+        return row
 
     records = [
         run(channels) for channels in coarse_channels(estimate.patch_dimension, estimate.channels)
@@ -216,6 +220,7 @@ def _repeat_boundaries(
     seed: int,
     steps: int,
     batch_size: int,
+    target_nmse: float,
     max_patch_samples: int,
 ) -> list[dict[str, Any]]:
     candidates = {
@@ -259,7 +264,8 @@ def _repeat_boundaries(
                     "channels": channels,
                     "latent_dimension": estimate.grid_height * estimate.grid_width * channels,
                     "seed": repeat_seed,
-                    "passed": float(metrics["final_nmse"]) <= 0.05,
+                    "target_nmse": target_nmse,
+                    "passed": float(metrics["final_nmse"]) <= target_nmse,
                     **metrics,
                 }
             )
@@ -282,7 +288,7 @@ def _validate_unet(
     seed: int,
     steps: int,
     batch_size: int,
-    target_nmse: float = 0.05,
+    target_nmse: float = PRIMARY_NMSE_TARGET,
 ) -> list[dict[str, Any]]:
     cache_path = dataset_dir / "unet_cache.json"
     cache: dict[str, dict[str, Any]] = {}
@@ -333,7 +339,10 @@ def _validate_unet(
                 f"NMSE {metrics['initial_nmse']:.4f} -> {metrics['final_nmse']:.4f}",
                 flush=True,
             )
-        records.append(cache[key])
+        row = dict(cache[key])
+        row["target_nmse"] = target_nmse
+        row["passed"] = bool(float(row["final_nmse"]) <= target_nmse)
+        records.append(row)
     return records
 
 
@@ -807,10 +816,16 @@ def _reference_check(
     seed: int,
     max_train: int,
     max_test: int,
+    target_nmse: float,
 ) -> dict[str, Any]:
     reference_path = files("mssrd.paper").joinpath("reference_results.json")
     reference = json.loads(reference_path.read_text(encoding="utf-8"))
-    comparable = seed == 20260924 and max_train == 20000 and max_test == 5000
+    comparable = (
+        seed == 20260924
+        and max_train == 20000
+        and max_test == 5000
+        and np.isclose(target_nmse, float(reference["target_nmse"]))
+    )
     checks: list[dict[str, Any]] = []
     for row in summaries:
         expected = reference["datasets"].get(str(row["slug"]))
@@ -875,6 +890,7 @@ def _build_figures(
     true_bottleneck_boundaries: list[dict[str, Any]],
     spectra: dict[str, dict[int, np.ndarray]],
     output_dir: Path,
+    target_nmse: float,
 ) -> None:
     figure_dir = output_dir / "figures"
     figure_dir.mkdir(parents=True, exist_ok=True)
@@ -923,6 +939,10 @@ def _build_figures(
             max(float(row["predicted_latent_dimension"]), float(row["empirical_latent_dimension"]))
             for row in summaries
         )
+        minimum = min(
+            min(float(row["predicted_latent_dimension"]), float(row["empirical_latent_dimension"]))
+            for row in summaries
+        )
         figure, axis = plt.subplots(figsize=(7.3, 5.2), constrained_layout=True)
         handles: list[Line2D] = []
         for index, row in enumerate(summaries, start=1):
@@ -930,7 +950,17 @@ def _build_figures(
             y = float(row["predicted_latent_dimension"])
             color = palette[str(row["category"])]
             axis.scatter(x, y, s=95, color=color, edgecolor="black", linewidth=0.45)
-            axis.text(x, y, str(index), ha="center", va="center", fontsize=7)
+            x_offset = 5 if index % 2 else -6
+            y_offset = 5 if index % 3 else -7
+            axis.annotate(
+                str(index),
+                (x, y),
+                xytext=(x_offset, y_offset),
+                textcoords="offset points",
+                ha="center",
+                va="center",
+                fontsize=7,
+            )
             handles.append(
                 Line2D(
                     [],
@@ -944,16 +974,22 @@ def _build_figures(
                 )
             )
         axis.plot(
-            [1, maximum * 1.1], [1, maximum * 1.1], color="#555555", linestyle="--", linewidth=1
+            [minimum / 1.25, maximum * 1.1],
+            [minimum / 1.25, maximum * 1.1],
+            color="#555555",
+            linestyle="--",
+            linewidth=1,
         )
         axis.set(
             xscale="log",
             yscale="log",
             xlabel="Empirical minimum tested latent scalars",
             ylabel="Training-free predicted latent scalars",
-            title="Predicted versus empirical bottlenecks at NMSE <= 0.05",
+            title=f"Predicted versus empirical bottlenecks at NMSE <= {target_nmse:g}",
         )
         axis.grid(True, which="both", alpha=0.2)
+        axis.set_xlim(minimum / 1.25, maximum * 1.15)
+        axis.set_ylim(minimum / 1.25, maximum * 1.15)
         axis.legend(
             handles=handles,
             loc="upper left",
@@ -1033,7 +1069,7 @@ def _build_figures(
                     label=f"q={scale}",
                 )
             summary = next(row for row in summaries if row["slug"] == slug)
-            axis.axhline(0.05, color="#333333", linestyle="--", linewidth=1)
+            axis.axhline(target_nmse, color="#333333", linestyle="--", linewidth=1)
             axis.axvline(
                 float(summary["predicted_latent_dimension"]),
                 color="#d55e00",
@@ -1047,7 +1083,7 @@ def _build_figures(
                 ylabel="External-pool NMSE",
                 title=slug,
             )
-            axis.set_ylim(8e-3, 1.2)
+            axis.set_ylim(1e-4, 1.2)
             axis.xaxis.set_major_locator(LogLocator(base=10, numticks=4))
             axis.xaxis.set_minor_formatter(NullFormatter())
             axis.grid(alpha=0.2, which="both")
@@ -1089,7 +1125,13 @@ def _build_figures(
                 capsize=2,
                 label=label,
             )
-        axis.axhline(0.05, color="#333333", linestyle="--", linewidth=1.1, label="5% NMSE target")
+        axis.axhline(
+            target_nmse,
+            color="#333333",
+            linestyle="--",
+            linewidth=1.1,
+            label=f"{target_nmse:g} NMSE target",
+        )
         axis.set(
             xticks=x,
             xticklabels=order,
@@ -1118,7 +1160,6 @@ def _build_figures(
                 "#009e73",
                 "s",
             ),
-            ("full_skip_prediction", "MS-SRD c", "#0072b2", "o"),
         )
         figure, axis = plt.subplots(figsize=(7.5, 3.9), constrained_layout=True)
         x = np.arange(len(order))
@@ -1139,7 +1180,13 @@ def _build_figures(
                 linewidth=1,
                 label=label,
             )
-        axis.axhline(0.05, color="#333333", linestyle="--", linewidth=1, label="5% target")
+        axis.axhline(
+            target_nmse,
+            color="#333333",
+            linestyle="--",
+            linewidth=1,
+            label=f"{target_nmse:g} target",
+        )
         axis.set(
             yscale="log",
             xticks=x,
@@ -1184,7 +1231,13 @@ def _build_figures(
             for boundary in selected_boundaries:
                 target = float(boundary["target_nmse"])
                 color = target_colors.get(target, "#666666")
-                axis.axhline(target, color=color, linewidth=0.6, alpha=0.55)
+                is_primary = np.isclose(target, target_nmse)
+                axis.axhline(
+                    target,
+                    color=color,
+                    linewidth=0.9 if is_primary else 0.5,
+                    alpha=0.9 if is_primary else 0.35,
+                )
                 if boundary["test_oracle_channels"] is not None:
                     axis.scatter(
                         [int(boundary["test_oracle_channels"])],
@@ -1258,19 +1311,25 @@ def _build_figures(
         for target in sorted(target_colors, reverse=True):
             rows = [row for row in complete_boundaries if float(row["target_nmse"]) == target]
             color = target_colors[target]
+            is_primary = np.isclose(target, target_nmse)
             axis_scatter.scatter(
                 [int(row["predicted_channels"]) for row in rows],
                 [int(row["test_oracle_channels"]) for row in rows],
                 color=color,
-                s=25,
+                s=36 if is_primary else 20,
+                alpha=1.0 if is_primary else 0.5,
+                edgecolors="#222222" if is_primary else "none",
+                linewidths=0.5 if is_primary else 0.0,
                 label=f"NMSE {target:g}",
             )
             axis_ratio.scatter(
                 np.full(len(rows), target),
                 [int(row["test_oracle_channels"]) / int(row["predicted_channels"]) for row in rows],
                 color=color,
-                s=22,
-                alpha=0.85,
+                s=32 if is_primary else 18,
+                alpha=1.0 if is_primary else 0.45,
+                edgecolors="#222222" if is_primary else "none",
+                linewidths=0.5 if is_primary else 0.0,
             )
         median_targets = sorted(target_colors)
         median_ratios = [
@@ -1337,6 +1396,7 @@ def reproduce_paper(
     least_volume_steps: int = 800,
     unet_batch_size: int = 256,
     unet_targets: Sequence[float] = UNET_NMSE_TARGETS,
+    target_nmse: float = PRIMARY_NMSE_TARGET,
     device: str = "auto",
     download: bool = True,
     spectral_only: bool = False,
@@ -1389,7 +1449,7 @@ def reproduce_paper(
             flush=True,
         )
         estimator = MSSRD(
-            retained_variance=0.95,
+            target_nmse=target_nmse,
             scales=scales,
             color_mode="grayscale",
             seed=seed,
@@ -1403,7 +1463,7 @@ def reproduce_paper(
         bootstrap = _bootstrap_geometry(
             train,
             scales=scales,
-            retained_variance=0.95,
+            retained_variance=1.0 - target_nmse,
             repetitions=bootstrap_reps,
             seed=seed + 77,
         )
@@ -1435,7 +1495,7 @@ def reproduce_paper(
                             seed=seed,
                             steps=steps,
                             batch_size=batch_size,
-                            target_nmse=0.05,
+                            target_nmse=target_nmse,
                             max_patch_samples=max_patch_samples,
                         )
                     )
@@ -1463,6 +1523,7 @@ def reproduce_paper(
                         seed=seed,
                         steps=steps,
                         batch_size=batch_size,
+                        target_nmse=target_nmse,
                         max_patch_samples=max_patch_samples,
                     )
                     all_repeats.extend(repeated)
@@ -1478,6 +1539,7 @@ def reproduce_paper(
                     seed=seed,
                     steps=unet_steps,
                     batch_size=unet_batch_size,
+                    target_nmse=target_nmse,
                 )
                 all_unet_runs.extend(dataset_unet_runs)
                 _write_csv(dataset_dir / "unet_runs.csv", dataset_unet_runs)
@@ -1525,7 +1587,13 @@ def reproduce_paper(
     _write_csv(output / "unet_runs.csv", all_unet_runs)
     _write_csv(output / "true_bottleneck_runs.csv", all_true_bottleneck_runs)
     _write_csv(output / "true_bottleneck_boundaries.csv", all_true_bottleneck_boundaries)
-    reference_check = _reference_check(summaries, seed=seed, max_train=max_train, max_test=max_test)
+    reference_check = _reference_check(
+        summaries,
+        seed=seed,
+        max_train=max_train,
+        max_test=max_test,
+        target_nmse=target_nmse,
+    )
     _write_json(output / "reference_check.json", reference_check)
     metrics = _metrics(summaries, all_repeats)
     _write_json(output / "metrics.json", metrics)
@@ -1542,6 +1610,7 @@ def reproduce_paper(
         all_true_bottleneck_boundaries,
         spectra,
         output,
+        target_nmse,
     )
     if run_geometry_stress_experiment and not unet_only and "oxford_pets" in selected:
         from mssrd.paper.geometry import run_geometry_stress
@@ -1552,6 +1621,7 @@ def reproduce_paper(
             seed=seed,
             max_train=min(max_train, 3680),
             download=download,
+            target_nmse=target_nmse,
         )
     if run_deployable_baseline_experiment and not spectral_only and not unet_only:
         from mssrd.paper.baselines import BASELINE_DATASETS, run_deployable_baselines
@@ -1571,6 +1641,7 @@ def reproduce_paper(
                 device=device,
                 download=download,
                 datasets=baseline_datasets,
+                target_nmse=target_nmse,
             )
     print(f"Wrote paper results to {output}", flush=True)
     if reference_check["all_spectral_predictions_match"] is False:

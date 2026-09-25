@@ -218,10 +218,10 @@ def run_deployable_baselines(
     device: str = "auto",
     download: bool = True,
     datasets: tuple[str, ...] = BASELINE_DATASETS,
+    target_nmse: float = 0.01,
 ) -> list[dict[str, Any]]:
     """Run training-free, grid-search, and Least-Volume width selectors."""
 
-    target_nmse = 0.05
     training_device = _device(device)
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
