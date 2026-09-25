@@ -61,6 +61,22 @@ def test_constant_features_are_counted_and_ignored() -> None:
     assert result.nonconstant_input_features == 56
 
 
+def test_global_pca_uses_the_full_centered_covariance_spectrum() -> None:
+    rng = np.random.default_rng(17)
+    images = rng.normal(size=(48, 6, 5))
+    result = predict_bottleneck(images, scales=[2], compute_global=True)
+
+    flattened = images.reshape(len(images), -1)
+    centered = flattened - flattened.mean(axis=0, keepdims=True)
+    expected = np.linalg.eigvalsh(centered.T @ centered / len(centered))[::-1]
+    expected = np.maximum(expected, 0.0)
+
+    assert result.global_eigenvalues is not None
+    np.testing.assert_allclose(result.global_eigenvalues, expected, rtol=1e-12, atol=1e-12)
+    retained = np.searchsorted(np.cumsum(expected), 0.99 * expected.sum()) + 1
+    assert result.global_pca_dimension == retained
+
+
 def test_all_constant_dataset_is_rejected() -> None:
     with pytest.raises(ValueError, match="all input features are constant"):
         predict_bottleneck(np.ones((10, 8, 8)), scales=[2, 4])

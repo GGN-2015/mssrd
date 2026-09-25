@@ -783,7 +783,7 @@ def _summary_row(
             "scale to [0,1], subtract training per-pixel mean; no per-pixel variance normalization"
         ),
         "retained_variance_target": result.retained_variance,
-        "global_pca95_dimension": result.global_pca_dimension,
+        "global_pca_dimension": result.global_pca_dimension,
         "constant_input_features": result.constant_input_features,
         "scales": [item.to_dict(include_eigenvalues=False) for item in result.scales],
         "predicted_q": prediction.scale,
@@ -1011,8 +1011,8 @@ def _build_figures(
             x - width,
             [
                 np.nan
-                if row["global_pca95_dimension"] is None
-                else float(row["global_pca95_dimension"])
+                if row.get("global_pca_dimension", row.get("global_pca95_dimension")) is None
+                else float(row.get("global_pca_dimension", row.get("global_pca95_dimension")))
                 for row in summaries
             ],
             width,
@@ -1457,7 +1457,7 @@ def reproduce_paper(
             color_mode="grayscale",
             seed=seed,
             batch_size=512,
-            compute_global=max(train.shape[1:]) <= 32,
+            compute_global=True,
         )
         result = estimator.fit(train)
         mean_image = estimator.mean_image_[..., 0].astype(np.float32)

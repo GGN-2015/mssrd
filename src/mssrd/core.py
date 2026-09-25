@@ -255,6 +255,14 @@ def _covariance_spectrum(samples: FloatArray) -> tuple[FloatArray, FloatArray]:
     return np.maximum(eigenvalues[order], 0.0), eigenvectors[:, order]
 
 
+def _centered_covariance_eigenvalues(centered_samples: FloatArray) -> FloatArray:
+    """Return descending covariance eigenvalues without materializing eigenvectors."""
+
+    covariance = centered_samples.T @ centered_samples / len(centered_samples)
+    eigenvalues = np.linalg.eigvalsh(covariance)
+    return np.maximum(eigenvalues[::-1], 0.0)
+
+
 def _patch_spectrum(
     centered_images: FloatArray,
     scale: int,
@@ -438,7 +446,9 @@ class MSSRD:
         global_dimension: int | None = None
         global_eigenvalues: FloatArray | None = None
         if self.compute_global:
-            global_eigenvalues, _ = _covariance_spectrum(centered.reshape(len(centered), -1))
+            global_eigenvalues = _centered_covariance_eigenvalues(
+                centered.reshape(len(centered), -1)
+            )
             global_dimension = _pca_dimension(global_eigenvalues, self.retained_variance)
         self.mean_image_ = mean_image
         self.input_shape_ = (height, width, channels)
